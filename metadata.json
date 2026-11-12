@@ -1,0 +1,1 @@
+{"name":"SETU Emergency Coordination Prototype","description":"Multilingual voice-first emergency coordination prototype for India using deterministic dispatch and simulated resources.","requestFramePermissions":["microphone","geolocation"],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}

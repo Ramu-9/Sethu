@@ -1,0 +1,3114 @@
+# SETU — FINAL MASTER ENGINEERING SPECIFICATION
+## Voice-First Emergency Coordination Prototype for India
+
+---
+
+# 0. INTERPRETATION, PRECEDENCE AND LOCKED DECISIONS
+
+## 0.1 Keywords
+
+MUST, MUST NOT, NEVER and DO NOT are absolute requirements.
+SHOULD marks a strong default that may be departed from only with a written reason.
+"Lead engineer" means the human owner of this project, who gives you this specification.
+
+## 0.2 Precedence
+
+1. Section 2.1 (emergency-service disclaimer) and Section 5 (non-negotiable architectural rules) override everything else.
+2. All other sections apply equally.
+3. If two sections conflict, or a requirement cannot be satisfied as written, STOP and ask the lead engineer. Never resolve a conflict silently and never pick the interpretation that is easier to build.
+
+## 0.3 Locked decisions
+
+These are fixed and are not reopened without the lead engineer's explicit approval:
+- Dispatch is deterministic Python. The reasoning model never decides resources.
+- Prisma (v2.5 baseline) is the only speech-to-text model.
+- Timbre (v2.5 baseline) is the only text-to-speech model.
+- The Google Gemini API is the reasoning model.
+- PostgreSQL is the authoritative store. No Redis.
+- Python and FastAPI only. No Java or Spring Boot. No Monte Carlo.
+- All resources, availability, assignments and ETAs are simulated and labelled as such.
+
+## 0.4 Open decisions
+
+Open decisions are tracked as numbered gates in Section 29 and summarised in Section 34. Do not implement a feature that depends on an unresolved gate beyond the interim default the gate states.
+
+## 0.5 Glossary
+
+- Session: one caller connection lifecycle, persisted in PostgreSQL. A WebSocket is a connection to a session, not the session itself.
+- Incident: the emergency record created for a session.
+- Utterance: one segment of caller speech. A finalized utterance is a transcript segment Prisma has marked final.
+- Simulated resource: a synthetic database record representing a vehicle or team. It is never a real vehicle.
+- Assignment: a backend-created link between an incident and a simulated resource.
+- Control-room review: a simulated review workflow inside this application. It is never a real control room.
+- Location candidate: GPS with accuracy of 500 metres or less, or a landmark match awaiting confirmation. It is not a confirmed location.
+- Confirmed location: a location whose confirmation status is confirmed by the caller.
+- Provider-blocked turn: a finalized utterance for which the reasoning provider blocked, filtered, truncated or emptied its response through its safety systems (see Section 9.4).
+
+---
+
+# 1. ROLE AND RESPONSIBILITIES
+
+You are a senior backend engineer implementing SETU, a voice-first emergency coordination prototype for India.
+
+I am the lead engineer.
+
+You write code. I review, test and own the architecture.
+
+Your responsibilities:
+- Implement the architecture specified here.
+- Write clean, maintainable, production-grade-structured code.
+- Write tests before implementation.
+- Follow verified API contracts.
+- Explain important engineering decisions.
+- Identify technical limitations honestly.
+- Keep changes small and reviewable.
+
+You do not independently redesign the architecture.
+
+Never invent:
+- API endpoints.
+- Authentication mechanisms for external providers.
+- Request parameters.
+- Response structures.
+- Model capabilities.
+- WebSocket event names.
+- Audio formats.
+- Cancellation mechanisms.
+- Provider concurrency guarantees.
+- Database records.
+- Operational results.
+
+If an external API contract is unclear, write:
+
+# TODO(api-contract): <specific unresolved question>
+
+Stop implementation of that integration until the contract is resolved.
+
+Never silently substitute mock data, invented provider behaviour or placeholder logic.
+
+---
+
+# 2. PRODUCT OVERVIEW
+
+SETU (सेतु) is a multilingual, voice-first emergency coordination prototype.
+
+A caller can describe an emergency naturally in Telugu, Hindi, English or supported code-switched speech.
+
+Example:
+
+"Anna, ikkada road accident jarigindi. Oka person unconscious ga unnaru. Near railway station."
+
+SETU must:
+
+1. Listen to the caller.
+2. Transcribe speech.
+3. Understand the reported emergency.
+4. Extract relevant facts.
+5. Identify missing or conflicting information.
+6. Resolve and confirm the caller's location.
+7. Determine required resource categories using deterministic Python rules.
+8. Allocate appropriate simulated resources.
+9. Find suitable hospitals from a verified directory.
+10. Explain the situation and simulated response status.
+11. Provide continuous safety guidance and reassurance.
+12. Support natural caller interruptions.
+13. Support language changes without restarting the incident.
+14. Generate a structured incident handoff.
+15. Maintain an auditable event timeline.
+
+The application must demonstrate reliable voice interaction, practical Indian-language AI, backend engineering and a polished user experience.
+
+## 2.1 Emergency-service disclaimer
+
+SETU is a prototype.
+
+It does not replace India's official 112 emergency service.
+
+It is not connected to 112 and does not place calls to 112.
+
+It does not contact actual ambulance operators, police stations, fire services or hospitals.
+
+It demonstrates a potential future coordination layer that could complement official emergency services, subject to authorised deployment and integration.
+
+Never claim that the current prototype already integrates with or coordinates real 112 operations.
+
+Required disclosure:
+
+"SETU is a prototype for emergency coordination. It does not replace India's 112 emergency service and is not connected to 112. This demo uses simulated emergency resources, availability, assignments and ETAs. No real emergency response is requested or dispatched. For a real emergency, call 112."
+
+Present this disclosure:
+- Visually, on the initial application screen.
+- Visually, on the incident and dispatch interface.
+- Spoken, at session start, using pre-synthesized audio in the language the caller selected on the initial screen (English, Telugu or Hindi; default English). No language can be detected before the caller speaks, so do not claim detected-language playback at session start. Language detection applies from the first caller utterance onward (Section 17). Telugu and Hindi texts must be reviewed translations approved by the lead engineer; never machine-translate the disclosure at runtime.
+- In the public demonstration video.
+
+Every simulated resource, assignment, status and ETA must be clearly labelled.
+
+---
+
+# 3. THREE-MODEL ARCHITECTURE
+
+SETU uses exactly three models with separate responsibilities.
+
+## 3.1 Gnani Prisma — Speech-to-Text
+
+Purpose: Convert caller speech into text.
+
+Responsibilities:
+- Streaming speech recognition.
+- Indian-language speech recognition.
+- Telugu-English and Hindi-English code-switched speech recognition where supported.
+- Partial transcript handling.
+- Final transcript handling.
+- Language metadata where supported.
+- Preserve original transcript segments.
+
+Prisma is exclusively responsible for speech recognition.
+
+It does not decide resource assignments.
+
+## 3.2 Reasoning Model — Google Gemini API — Classification and Extraction
+
+The reasoning model is the Google Gemini API. It is an external reasoning provider, not a Gnani model. The exact Gemini model identifier, SDK or HTTP client, credentials and version-specific generation settings are configured separately by the lead engineer and are outside the scope of this document. Do not choose or assume a model identifier. Treat the reasoning adapter exactly as specified here.
+
+The adapter must remain provider-agnostic so the provider can be swapped without changing orchestrator code. The README and public demonstration must disclose that Prisma and Timbre are Gnani models and that the reasoning model is the Gemini API.
+
+Gemini-specific rules:
+- Use Gemini's structured-output capability with the application's typed schemas, only after confirming support for the selected model at Gate 0.3.
+- Provider safety filtering may block or truncate responses to legitimate emergency descriptions (for example violence, injury or fire). These are exactly the emergencies SETU exists to handle, so a block is expected behaviour to engineer for, not a rare edge case. A blocked, truncated, empty or filtered response is an integration failure. It is NOT a valid `unknown` classification and MUST NOT increment the unknown-classification counter. It is handled by the dedicated policy in Section 9.4, which guarantees that repeated blocks cannot leave a caller without a simulated assignment.
+- Caller transcripts and dialogue context (prior utterances, extracted facts and the pending follow-up question) are sent to Google's API. Disclose this in the third-party processing disclosure (Section 22) and confirm the account tier's data-usage terms at Gate 0.3.
+
+Use the reasoning model for:
+- Emergency classification.
+- Entity extraction.
+- Fact extraction.
+- Missing-information detection.
+- Conflict identification.
+- Follow-up question generation.
+- Interpretation of caller updates.
+- Structured incident analysis.
+- Conversational response formatting.
+- Interpretation of backend results.
+
+Use structured outputs and typed application schemas.
+
+The reasoning model must NEVER:
+- Select operational resource IDs.
+- Invent resource availability.
+- Invent assignments.
+- Invent dispatch reference numbers.
+- Invent ETAs.
+- Directly modify the resource database.
+- Decide whether a real vehicle should be dispatched.
+- Execute arbitrary database operations.
+- Bypass backend validation.
+- Generate unreviewed medical or first-aid instructions.
+
+The reasoning model identifies and extracts facts.
+
+The Python backend owns all operational decisions.
+
+Caller-facing dynamic text produced by the reasoning model must describe resource status only by using backend-provided values. It must never state or imply that real-world help has been requested, dispatched or is arriving. The backend must validate dynamic caller-facing text against this rule before synthesis and fall back to an approved cached phrase if validation fails.
+
+Use the official provider SDK or HTTP client only inside:
+
+adapters/reasoning.py
+
+Do not hardcode credentials or expose them to the frontend.
+
+Verify at Gate 0.3:
+- API key access.
+- Model availability.
+- Quota.
+- Billing.
+- SDK compatibility.
+- Structured-output support.
+- Current documented generation settings.
+
+If the reasoning model becomes unavailable:
+- Preserve the transcript.
+- Record the failure.
+- Do not fabricate a classification.
+- Use the static STAY WITH ME fallback defined in Section 15.4.
+- Keep the incident state.
+- Resume normal reasoning when the provider becomes available again.
+
+A provider failure is not the same as a valid `unknown` classification. Do not mislabel a technical outage or a safety-filter block as evidence that the caller's emergency is unknown.
+
+## 3.3 Gnani Timbre — Text-to-Speech
+
+Purpose: Convert SETU's written responses into speech.
+
+Responsibilities:
+- Spoken responses in supported Indian languages.
+- Understandable delivery.
+- Context-appropriate speech.
+- Streaming audio where the verified endpoint supports it.
+
+Keep Timbre isolated in:
+
+adapters/timbre.py
+
+Do not send unsupported expressive tags to an incompatible model.
+
+---
+
+# 4. GNANI MODEL VERSION AND CAPABILITY POLICY
+
+Participant account access takes priority over public documentation.
+
+The Great Indian AI Internship Challenge identifies Prisma v2.5 and Timbre v2.5 as participant API models.
+
+Newer v3.0 features are not guaranteed to be enabled on the participant account.
+
+The application must work with the v2.5 compatibility baseline.
+
+Design adapters around verified capabilities, not assumptions about model versions.
+
+## 4.1 Prisma
+
+Default compatibility target:
+
+Prisma v2.5
+
+Gnani advertises code-mixed speech recognition for this model.
+
+However, do not assume Prisma v2.5 supports the explicit v3.0 codemix output mode or v3.0-specific prompting parameters.
+
+Prisma v3.0 documents additional capabilities:
+- Explicit codemix output mode.
+- Keyterm prompting.
+- Additional language and context controls.
+
+Enable these only after confirming actual participant account access.
+
+### Exact terminology
+
+The documented mode value is:
+
+codemix
+
+Never use:
+
+code-mix
+
+The actual request parameter name depends on the selected API integration.
+
+Do not assume every REST, WebSocket or SDK integration uses the same parameter name.
+
+Before implementation:
+1. Confirm the exact endpoint.
+2. Confirm its transport.
+3. Read its current request schema.
+4. Confirm the parameter name.
+5. Use the exact value `codemix` only where supported.
+6. Confirm the response format.
+
+Never send v3.0-only parameters to Prisma v2.5.
+
+Do not assume v2.5 supports keyterm prompting.
+
+Use keyterms only where the selected model, account and endpoint explicitly support them.
+
+Never use an undocumented bias_list parameter.
+
+### Capability fallback
+
+If Prisma v3.0 is unavailable:
+- Keep Prisma v2.5 as the active model.
+- Continue using its supported code-mixed speech recognition.
+- Do not send unsupported codemix formatting parameters.
+- Record the active capability profile.
+- Report limitations honestly.
+
+## 4.2 Timbre
+
+Default compatibility target:
+
+Timbre v2.5
+
+Use supported plain-text synthesis.
+
+Do not assume Timbre v2.5 understands v3.0 expressive tags.
+
+Timbre v3.0 documents expressive tags such as:
+- <pauses>
+- <slow>
+- <whispers>
+- <excited>
+- <sigh>
+
+Use them only after verifying:
+- v3.0 access on the participant account.
+- Support in the selected endpoint.
+- Correct behaviour in a real-account synthesis test.
+
+Do not allow unsupported tags to be spoken literally or silently misinterpreted.
+
+If v3.0 is unavailable, use plain-text v2.5 synthesis.
+
+## 4.3 Capability profile
+
+Record the actual verified configuration at deployment.
+
+The profile must include:
+- Prisma model version.
+- Prisma endpoint and transport.
+- Prisma capabilities.
+- Prisma silence, low-confidence and non-speech signal shape (Gate 0.1).
+- Timbre model version.
+- Timbre endpoint and transport.
+- Timbre capabilities.
+- Reasoning provider and model identifier (Gemini).
+- Reasoning provider safety-filter behaviour and block signalling (Gate 0.3).
+- Account concurrency restrictions.
+- Audio encoding requirements.
+- Cancellation behaviour.
+
+Disable unverified capabilities.
+
+Do not invent an automatic model-discovery endpoint.
+
+Do not probe undocumented parameters.
+
+Do not rely on an API silently ignoring unsupported fields.
+
+---
+
+# 5. NON-NEGOTIABLE ARCHITECTURAL RULES
+
+## Rule 1 — Deterministic dispatch
+
+Emergency-to-resource mapping belongs entirely to Python.
+
+Implement it in:
+
+orchestrator/dispatch.py
+
+The reasoning model classifies the emergency and extracts facts.
+
+Python determines required resource categories.
+
+Python checks synthetic resource availability.
+
+Python allocates simulated assignments.
+
+The LLM must never control the dispatch decision.
+
+## Rule 2 — No model-generated operational data
+
+Only backend code may generate:
+- Resource IDs.
+- Assignment IDs.
+- Dispatch references.
+- Simulated availability.
+- Simulated ETAs.
+- Assignment statuses.
+- Incident IDs.
+
+## Rule 3 — Absolute fact provenance
+
+Every LLM-extracted incident fact MUST reference its source transcript segment.
+
+Use:
+
+source_utterance_id
+
+or an equivalent validated reference to the exact transcript segment.
+
+Where available, preserve the supporting text span.
+
+If a value is missing:
+- Keep it null or unknown.
+- Never guess.
+- Never fill it from assumptions.
+
+If statements conflict:
+- Preserve both statements.
+- Record their source utterances.
+- Flag the conflict.
+
+This requirement applies to every LLM-extracted incident fact.
+
+### Backend-generated facts have separate provenance
+
+Not every application fact originates in speech.
+
+GPS coordinates, hospital records, landmark records, synthetic resource records and tool results must use their own typed provenance.
+
+Use an application-owned provenance structure with fields such as:
+
+- source_type
+- source_id
+- source_timestamp
+- source_metadata
+
+Supported conceptual source types include:
+- caller_utterance
+- browser_gps
+- database_record
+- provider_response
+- backend_rule
+- human_review
+
+Only caller-derived extracted facts require source_utterance_id.
+
+Examples:
+- A caller saying a person is trapped requires source_utterance_id.
+- Browser GPS coordinates require browser_gps provenance.
+- A hospital capability requires database_record provenance.
+- A synthetic resource assignment requires backend_rule and database provenance.
+- A classification result must reference the caller utterances supporting it.
+
+Never attach fabricated utterance IDs to backend-generated facts.
+
+## Rule 4 — No free-form medical or first-aid advice
+
+STAY WITH ME is limited to:
+- Safety guidance.
+- Emotional reassurance.
+- Situation explanation.
+- Relevant follow-up questions.
+- Honest status communication.
+
+Do not generate medical diagnoses, treatment decisions or first-aid procedures.
+
+Use an approved, pre-reviewed instruction library.
+
+The reasoning model may select an eligible instruction but cannot invent or rewrite safety protocols.
+
+Every instruction must include:
+- Instruction ID.
+- Emergency category.
+- Approved text.
+- Language.
+- Source.
+- Review date.
+- Version.
+
+If no applicable reviewed instruction exists, provide calm general reassurance and request appropriate human assistance.
+
+## Rule 5 — Silence does not mean unconsciousness
+
+Never infer unconsciousness, death, injury or abandonment from silence alone.
+
+Follow the timeout policy.
+
+## Rule 6 — No speculative tool execution
+
+Never execute operational tools while the caller's utterance is incomplete.
+
+Never send partial transcripts to the reasoning model. Reasoning requests use finalized utterances only.
+
+Wait for utterance finalization.
+
+Validate extracted facts.
+
+Check permissions and session state.
+
+Then execute the approved backend operation.
+
+## Rule 7 — No Java or Spring Boot
+
+Use Python and FastAPI exclusively for the backend.
+
+No Java services.
+
+No Spring Boot.
+
+## Rule 8 — No Monte Carlo
+
+Do not add Monte Carlo simulations or unrelated probabilistic systems.
+
+Hospital ranking and dispatch use deterministic rules.
+
+## Rule 9 — No invented provider contracts
+
+When documentation is incomplete, stop and ask.
+
+Do not pretend an application abstraction is the provider's native API contract.
+
+---
+
+# 6. FIXED TECHNOLOGY STACK
+
+## Backend
+
+- Python 3.11.
+- FastAPI.
+- asyncio.
+- Pydantic v2.
+- PostgreSQL 16.
+- PostGIS.
+- pg_trgm.
+- SQLAlchemy 2.0 async with the asyncpg driver.
+- Alembic migrations.
+
+This database approach is fixed for the project. Use it consistently. Raw SQL via SQLAlchemy text() is permitted for PostGIS and pg_trgm queries.
+
+## Frontend
+
+- Vite.
+- React.
+- TypeScript.
+- Browser microphone capture.
+- Browser Geolocation API.
+- AudioWorklet.
+- Silero VAD through @ricky0123/vad-web.
+- ONNX Runtime Web.
+- MapLibre.
+- Responsive PWA-style interface.
+- TTFAB debugging overlay.
+
+## Infrastructure
+
+- Docker Compose.
+- PostgreSQL 16 with PostGIS.
+- Environment-based configuration.
+- Database migrations.
+- Structured logging.
+- Persistent media storage for pre-synthesized instruction audio.
+
+Do not introduce Redis for the initial demo.
+
+PostgreSQL is the authoritative persistence layer.
+
+---
+
+# 7. PROJECT STRUCTURE
+
+Keep all orchestration and incident-domain modules under orchestrator/.
+
+setu/
+│
+├── backend/
+│   ├── app/
+│   │   ├── main.py
+│   │   │
+│   │   ├── orchestrator/
+│   │   │   ├── session.py
+│   │   │   ├── policy.py
+│   │   │   ├── dispatch.py
+│   │   │   ├── hospital.py
+│   │   │   ├── location.py
+│   │   │   ├── instructions.py
+│   │   │   ├── timeout.py
+│   │   │   ├── duplicates.py
+│   │   │   └── handoff.py
+│   │   │
+│   │   ├── adapters/
+│   │   │   ├── base.py
+│   │   │   ├── prisma.py
+│   │   │   ├── reasoning.py
+│   │   │   ├── timbre.py
+│   │   │   └── mock.py
+│   │   │
+│   │   ├── models/
+│   │   │
+│   │   ├── db/
+│   │   │   ├── pool.py
+│   │   │   └── migrations/
+│   │   │
+│   │   ├── audit/
+│   │   │   ├── writer.py
+│   │   │   └── redaction.py
+│   │   │
+│   │   ├── observability/
+│   │   │   └── metrics.py
+│   │   │
+│   │   └── scripts/
+│   │       └── presynthesize_instructions.py
+│   │
+│   └── tests/
+│
+├── frontend/
+│   ├── src/
+│   ├── public/
+│   └── package.json
+│
+├── backend-media/
+│   └── instructions/
+│
+├── docker-compose.yml
+├── .env.example
+├── .gitignore
+└── README.md
+
+Module responsibilities:
+
+main.py:
+FastAPI entry point and WebSocket route /ws/session.
+
+session.py:
+Authoritative per-session state machine and conversation lifecycle.
+
+policy.py:
+Schema validation, permissions and tool authorisation.
+
+dispatch.py:
+Deterministic emergency mapping, resource lookup and simulated assignment.
+
+hospital.py:
+Eligibility filtering and weighted hospital ranking.
+
+location.py:
+GPS, landmark resolution and geospatial matching.
+
+instructions.py:
+Approved safety library, audio manifest and cached instruction playback.
+
+timeout.py:
+Caller silence handling and simulated control-room notifications.
+
+duplicates.py:
+Possible duplicate-incident detection.
+
+handoff.py:
+Structured incident handoff generation and persistence.
+
+adapters/base.py:
+Application-owned adapter interfaces.
+
+adapters/prisma.py:
+Gnani STT implementation.
+
+adapters/reasoning.py:
+Gemini reasoning model implementation.
+
+adapters/timbre.py:
+Gnani TTS implementation.
+
+adapters/mock.py:
+Test-only provider fakes.
+
+db/:
+Database access, schema and migrations.
+
+audit/:
+Append-only audit events and privacy redaction.
+
+observability/metrics.py:
+Latency and usage measurement per Section 24.
+
+Do not create every module immediately.
+
+Implement incrementally.
+
+---
+
+# 8. SESSION STATE AND PERSISTENCE
+
+PostgreSQL is the authoritative source of truth for session and incident state.
+
+Never keep authoritative session state only in Python dictionaries or process memory.
+
+Persist:
+- Session ID.
+- Current session state.
+- Incident ID.
+- Current incident state.
+- Current session revision.
+- Last persisted event sequence.
+- Transcript segments.
+- Validated extracted facts.
+- Consecutive unknown-classification counter.
+- Consecutive provider-blocked-turn counter.
+- Resource assignments.
+- Incident flags.
+- Timeline events.
+- Session completion status.
+
+Use transactions for state transitions and related writes.
+
+Use database constraints and appropriate row locking to prevent conflicting updates.
+
+## 8.1 WebSocket lifecycle
+
+A WebSocket is a connection to a session, not the session itself.
+
+Session tokens are application-owned: the backend issues a short-lived, signed token at session creation and validates it on every connection and reconnection. The signing mechanism and expiry are proposed by the engineer and approved by the lead engineer before implementation. The signing key is provisioned through environment or secret configuration, never committed to the repository, never sent to the frontend and never logged. Document a key-rotation procedure; rotation must invalidate outstanding tokens safely. Never expose provider credentials through this mechanism.
+
+If the WebSocket disconnects:
+- Do not destroy the incident.
+- Preserve persisted state.
+- Allow reconnection using an authorised session token.
+- Resume events using the client's last received event sequence.
+- Avoid replaying processed operational events.
+
+If the backend process restarts:
+- Restore session state from PostgreSQL.
+- Preserve finalized transcript segments and assignments.
+- Re-establish the client connection.
+- If unfinished audio was lost, ask the caller to repeat it.
+- Never fabricate lost audio content.
+
+Keep only temporary information in memory:
+- Active socket references.
+- Audio ring buffers.
+- VAD state.
+- Current provider stream handles.
+- Short-lived playback coordination.
+
+Temporary audio buffers may be lost on a process restart.
+
+Do not lose persisted incident information.
+
+No Redis is required for the initial deployment.
+
+Do not introduce distributed session infrastructure without approval.
+
+---
+
+# 9. INCIDENT CLASSIFICATION
+
+The reasoning model identifies an emergency category using a strict structured schema.
+
+Supported taxonomy:
+
+- medical_emergency
+- fire
+- fire_with_injuries
+- road_accident
+- building_collapse
+- physical_attack
+- gas_leak
+- explosion
+- unknown
+
+The `unknown` category is a valid classification output, not an invalid schema value.
+
+It is a signal that the reasoning model could not confidently assign a supported emergency category.
+
+It is not permission for the reasoning model to determine dispatch.
+
+The backend owns the consequences of that result.
+
+## 9.1 Extracted facts
+
+Use structured extracted facts where relevant:
+
+- injured_persons
+- trapped_persons
+- fire_reported
+- explosion_reported
+- gas_leak_reported
+- threat_present
+- vehicle_collision_reported
+- affected_person_count
+- caller_location_text
+- caller_observations
+- missing_information
+- conflicting_information
+
+Every LLM-extracted incident fact MUST have valid source_utterance_id provenance.
+
+Backend-generated facts use their own typed provenance, as specified in Rule 3.
+
+Example conceptual structure:
+
+{
+  "field": "trapped_persons",
+  "value": true,
+  "source_utterance_id": "utterance_id",
+  "evidence_text": "A person is trapped inside"
+}
+
+This is an application-owned conceptual structure, not a provider API payload.
+
+Never turn missing data into confirmed facts.
+
+## 9.2 Reasoning context — mandatory
+
+Every classification request MUST be sent with full dialogue context, not the current utterance in isolation.
+
+The reasoning adapter must receive:
+- All prior finalized utterances for this incident.
+- All validated extracted facts so far.
+- The current finalized utterance.
+- Any pending follow-up question the orchestrator has asked the caller.
+
+The reasoning model must be instructed to understand that short answers (yes, no, a number, an acknowledgment) are responses to the pending follow-up question, not standalone descriptions of a new emergency.
+
+Without dialogue context, short answers will be misclassified as `unknown` and will corrupt the classification-attempt counter.
+
+### Utterance role
+
+The structured output schema must include a required field `utterance_role` for the current utterance, with the enumerated values:
+
+- new_description
+- answer_to_pending_question
+- acknowledgement
+- other
+
+The backend, not the model, decides whether an utterance counts as a classification attempt, using this field together with the rules in Section 9.3. The `utterance_role` value must itself carry source_utterance_id provenance and be recorded in the audit trail. If `utterance_role` is missing or invalid, treat the response as schema-invalid (an integration failure, not a classification attempt).
+
+## 9.3 Unknown-emergency fallback
+
+This is a mandatory deterministic safety fallback.
+
+Do not repeatedly ask questions when the emergency remains unclear.
+
+Track classification attempts in persistent incident state.
+
+### Definition of a classification attempt
+
+A classification attempt occurs when one unique, finalized caller utterance with `utterance_role = new_description` is submitted for reasoning-model analysis and the provider returns a usable, schema-valid response.
+
+The following count as a failed classification attempt:
+- The reasoning model returns the valid category `unknown` for a new_description utterance.
+- The reasoning model cannot establish a sufficiently reliable supported category for a new_description utterance.
+
+The following do NOT count as classification attempts:
+- Utterances with `utterance_role` of answer_to_pending_question, acknowledgement or other.
+- Short answers to a pending follow-up question (yes, no, a number, an acknowledgment, a corrected location word).
+- Silence.
+- Duplicate processing of the same finalized utterance.
+- Schema-invalid or malformed model responses (these are integration failures).
+- Provider-blocked turns (these are integration failures with their own counter and policy in Section 9.4).
+- Provider outages (these are technical failures).
+
+### Confidence threshold
+
+A supported category is accepted only when the reasoning model returns it with confidence at or above the configured classification threshold.
+
+Default threshold: 0.70.
+
+Configurable by the lead engineer.
+
+If a returned category's confidence is below the threshold, the result is treated as `unknown` for classification purposes.
+
+### Counter behaviour
+
+1. A distinct, finalized caller utterance with role new_description produces a valid `unknown` result.
+2. Increment the consecutive unknown-classification counter.
+3. Ask one focused follow-up question where useful.
+4. Process the next distinct, finalized new_description utterance.
+5. If it produces a supported emergency category above threshold, reset the counter to zero.
+6. If it also produces `unknown`, the counter reaches two.
+7. Apply the fallback immediately after the second consecutive unknown result.
+
+### Backend fallback after two unknown results
+
+The backend must:
+
+1. Set the incident category to `unknown`.
+2. Apply the deterministic `unknown` resource mapping.
+3. Request a simulated ambulance resource.
+4. Set control_room_review_required = true.
+5. Record the failed classification count.
+6. Preserve the supporting utterance IDs.
+7. Create an audit event.
+8. Inform the caller honestly.
+
+The required mapping is:
+
+unknown:
+- Ambulance.
+
+The control-room review is a simulated application feature.
+
+It is not a real control-room connection.
+
+Required caller-facing statement:
+
+"SETU couldn't confidently identify the emergency. In this demo, I've created a simulated ambulance assignment and flagged the incident for review. This is not a real dispatch."
+
+Never say that an actual ambulance is coming.
+
+If no synthetic ambulance is available:
+- Preserve the incident.
+- Mark the resource pending or unavailable.
+- Keep the control-room review flag.
+- Report the failure honestly.
+
+Do not repeatedly ask questions after the threshold is reached.
+
+Provider outages must follow the separate technical failure and STAY WITH ME fallback policies. Do not pretend a provider outage was a valid classification result.
+
+After the fallback has been applied, later caller utterances continue to be processed. If a later new_description utterance yields a supported category at or above threshold, apply the reclassification rules in Section 10.4.
+
+### Session-ending fallback for a single unknown
+
+If the session ends (WebSocket close without reconnect, caller hang-up, timeout exhaustion as defined by the approved timeout policy in Section 19, or explicit session termination) while the consecutive unknown counter equals one and no supported category above threshold has been established:
+
+1. Set the incident category to `unknown`.
+2. Apply the `unknown` mapping.
+3. Request a simulated ambulance resource.
+4. Set control_room_review_required = true.
+5. Record the fallback reason as `session_ended_before_second_attempt`.
+6. Create an audit event.
+
+This ensures that an incoherent or abandoned call is not silently discarded.
+
+### Single application of the fallback
+
+The deterministic unknown fallback is applied at most once per incident, whatever triggers it (two unknown results, session end after one unknown, consecutive provider blocks, or session end after a provider block). Later triggers append their own audit event and reason code but create no further assignments (idempotency keys apply).
+
+## 9.4 Provider-blocked emergency content
+
+Provider safety systems may block, filter, truncate or empty the reasoning response for a legitimate emergency description (for example an attack with a weapon, bleeding or fire). This MUST NOT leave a caller with no simulated response.
+
+### Definitions
+
+A provider-blocked turn is a finalized utterance for which the provider's verified signalling (Gate 0.3) indicates that its response was blocked, filtered, truncated or emptied by safety systems.
+
+A blocked response carries no `utterance_role`. The backend therefore treats every provider-blocked turn the same way, regardless of what role the utterance would have had.
+
+A provider-blocked turn is an integration failure. It is not an `unknown` classification and never increments the unknown-classification counter.
+
+Provider blocks are distinct from outages. Outages, timeouts, disconnects, authentication failures and quota or rate-limit exhaustion use the reason code `reasoning_unavailable`. Safety-filter blocks use the reason code `provider_blocked_emergency_content`. Never reuse one code for the other.
+
+### State
+
+Track `consecutive_provider_blocks` in persistent incident state. Reset it to zero on any schema-valid reasoning response, whatever its category.
+
+### Escalation
+
+N is the number of consecutive blocked turns that triggers the fallback. Default N = 2. Configurable at Gate 0.13.
+
+1. First blocked turn: record an audit event `provider_blocked` at info severity. Play an approved cached reassurance phrase and an approved cached prompt asking the caller to describe the situation again in their own words. Set no flag yet.
+2. Nth consecutive blocked turn, when no supported category at or above threshold has been established for the incident: apply the deterministic unknown fallback. Set the incident category to `unknown`, apply the `unknown` mapping (ambulance), set control_room_review_required = true with reason `provider_blocked_emergency_content` and fallback reason `consecutive_provider_blocks`, record a warning-severity audit event, preserve the supporting utterance IDs, and give the caller the required statement below.
+3. Nth consecutive blocked turn, when a supported category at or above threshold HAS already been established: no new assignment is created. Set a warning-severity review flag with reason `provider_blocked_emergency_content` and continue reassurance.
+4. Further blocked turns: do not repeat the fallback. Log each as a provider_blocked audit event, continue reassurance, and keep attempting reasoning on every new finalized utterance.
+
+### Session end after a block
+
+If the session ends while `consecutive_provider_blocks` is at least one and no supported category at or above threshold has been established, apply the deterministic unknown fallback with reason `session_ended_after_provider_block`, subject to the single-application rule in Section 9.3.
+
+### Required caller-facing statement
+
+"SETU is having trouble processing what you described. In this demo, I've created a simulated ambulance assignment and flagged the incident for review. This is not a real dispatch."
+
+This must be an approved, pre-synthesized phrase in every supported language. Never say that an actual ambulance is coming.
+
+### Local keyword classification
+
+A deterministic Python keyword classifier for blocked turns (multilingual emergency indicator terms mapped to the taxonomy) is NOT implemented unless the lead engineer approves a reviewed Telugu, Hindi, English and romanised keyword table at Gate 0.13. If approved, it uses only that table, produces backend_rule provenance plus the source utterance ID, never overrides a schema-valid model result, and goes through the same dispatch rules in Section 10.
+
+### Mitigation at the provider
+
+Safety-threshold configurability for the Gemini account tier is confirmed at Gate 0.3. If thresholds are configurable, use the least restrictive setting the lead engineer approves, then re-test with realistic emergency descriptions. The escalation policy above still applies, because no setting guarantees that no block occurs.
+
+---
+
+# 10. DETERMINISTIC DISPATCH
+
+Emergency-to-resource mapping belongs entirely in Python.
+
+Implement it in:
+
+orchestrator/dispatch.py
+
+The reasoning model classifies the reported emergency and extracts facts.
+
+Python determines the required resource categories.
+
+Python checks synthetic resource availability.
+
+Python allocates simulated assignments.
+
+## 10.1 Base dispatch mapping
+
+The following base mapping is the starting approved table:
+
+medical_emergency:
+- Ambulance.
+
+fire:
+- Fire engine.
+
+fire_with_injuries:
+- Fire engine.
+- Ambulance.
+
+road_accident:
+- Ambulance.
+- Police patrol.
+
+building_collapse:
+- Fire and rescue.
+- Ambulance.
+- Police patrol.
+
+physical_attack:
+- Police patrol.
+
+gas_leak:
+- Fire engine.
+- Police patrol.
+
+explosion:
+- Fire engine.
+- Ambulance.
+- Police patrol.
+
+unknown:
+- Ambulance.
+
+Do not allow the reasoning model to add or remove resources.
+
+## 10.2 Additional-resource rules
+
+There may be additional resources based on validated incident facts.
+
+Examples of possible rules:
+
+- road_accident + trapped_persons=true → additionally require Fire and rescue.
+- physical_attack + injured_persons=true → additionally require Ambulance.
+
+These examples are illustrative.
+
+They are NOT permission to implement an expanded rule table.
+
+The complete additional-resource rule table MUST be explicitly reviewed and approved by the lead engineer before dispatch.py implements any additional-resource rules.
+
+Until that approval:
+- Implement only the exact base mapping above.
+- Do not infer other additional-resource rules.
+- Do not create additional rules from general knowledge.
+- Do not let the reasoning model make these decisions.
+
+Once an additional rule is approved, implement it as an explicit deterministic Python condition.
+
+Every input fact to such a rule must have validated provenance.
+
+## 10.3 Resource allocation
+
+The database contains synthetic resource records.
+
+For each required category:
+
+1. Confirm a location candidate exists (see location precondition below).
+2. Query eligible synthetic resources.
+3. Check simulated availability.
+4. Select a suitable resource using deterministic backend criteria. Default criterion pending lead-engineer approval: nearest available resource by geodesic distance (PostGIS), tie-broken by resource ID.
+5. Create an assignment using a backend-generated ID.
+6. Generate a simulated ETA only through approved backend logic. If no approved ETA model exists (see Gate 0.8), leave the ETA null and label it unavailable. Never estimate an ETA ad hoc.
+7. Persist the assignment.
+8. Record an audit event.
+
+One incident may receive multiple independent assignments.
+
+Each assignment must contain:
+- Assignment ID.
+- Resource ID.
+- Resource category.
+- Simulated status.
+- Assignment timestamp.
+- Simulated ETA, if available.
+- Incident ID.
+
+Use idempotency keys to prevent duplicate assignments. Idempotency keys are scoped per incident and resource category.
+
+Select and claim resources inside a transaction using row-level locking (for example SELECT ... FOR UPDATE SKIP LOCKED) so two concurrent incidents can never claim the same synthetic resource.
+
+Never generate identifiers or ETAs through the reasoning model.
+
+### Location precondition
+
+Resource selection requires a location candidate: GPS with accuracy of 500 metres or less, or a caller-confirmed landmark (Section 12).
+
+If no location candidate exists:
+- Record the required resource categories on the incident.
+- Create each requirement with status `pending_location` and select no resource.
+- Set control_room_review_required = true.
+- Create an audit event.
+- Ask the caller for location.
+- Allocate as soon as a location candidate exists.
+
+Never fabricate proximity or select a resource without a location candidate.
+
+## 10.4 Reclassification
+
+The incident category may change during a session (for example unknown → medical_emergency, or fire → fire_with_injuries) when a later new_description utterance yields a supported category at or above the confidence threshold.
+
+On reclassification:
+1. Record the previous and new category with supporting utterance IDs.
+2. Recompute the required resource categories from the base mapping (and approved additional rules).
+3. Create assignments only for required categories not already assigned (idempotency keys apply).
+4. Never automatically cancel, release or modify existing assignments. Resources that are no longer required remain assigned and are flagged for simulated control-room review.
+5. Create an audit event.
+6. Re-run duplicate detection per Section 14.
+
+---
+
+# 11. POSSIBLE FALSE OR PRANK CALL FLAG
+
+The incident model must support:
+
+possible_false_or_prank_call
+
+Also store:
+- flag_reason.
+- flag_source.
+- flag_timestamp.
+- review_status.
+- reviewer_id where available.
+- Supporting event or utterance references.
+
+Possible review statuses:
+
+- not_reviewed
+- flagged_for_review
+- confirmed_false_or_prank
+- not_false_or_prank
+
+The flag is a review indicator, not an automated conclusion.
+
+Rules:
+
+- The reasoning model cannot independently declare a caller a confirmed prank caller.
+- Silence is not evidence of a prank.
+- Unclear speech is not evidence of a prank.
+- A language barrier is not evidence of a prank.
+- A provider-blocked turn is not evidence of a prank.
+- Inconsistent or incomplete information is not proof of bad faith.
+- A possible-prank flag must never automatically cancel assignments.
+- A possible-prank flag must never suppress unknown-emergency fallback.
+- A reviewer must be able to inspect supporting evidence.
+
+Demonstrate this as an auditable review workflow, not an automated accusation system.
+
+---
+
+# 12. LOCATION RESOLUTION
+
+Location must use explicit confidence rules.
+
+## 12.1 Primary: Browser GPS
+
+Use the browser Geolocation API after explicit permission.
+
+Store:
+- Latitude.
+- Longitude.
+- Accuracy radius in metres.
+- Timestamp.
+- Permission status.
+- Location source.
+
+### Exact GPS threshold
+
+If GPS accuracy radius is:
+
+- 500 metres or less: GPS may be used as the location candidate, with accuracy recorded.
+- Greater than 500 metres: treat GPS as insufficiently precise and request a spoken landmark.
+- Missing or invalid accuracy: treat GPS as insufficiently precise and request a spoken landmark.
+
+Never silently treat a GPS result with accuracy greater than 500 metres as precise.
+
+Keep accuracy visible in diagnostics.
+
+Ask for caller confirmation when appropriate.
+
+## 12.2 Secondary: Spoken landmark
+
+When GPS is unavailable, denied or insufficiently precise:
+
+1. Ask for a nearby landmark.
+2. Extract original landmark text from the finalized transcript.
+3. Search the local landmark database.
+4. Rank candidates using PostGIS and pg_trgm.
+5. Return candidates with confidence information.
+6. Ask the caller to confirm when ambiguous.
+
+Do not silently select an uncertain landmark.
+
+### Landmark data source
+
+The landmark database may be populated only from a source approved at Gate 0.7b. Every landmark record must retain its name (native script and romanised form), coordinates, source URL or identifier, source licence or terms, and ingestion date.
+
+Until Gate 0.7b is approved, use only a clearly labelled synthetic landmark set, mark it as synthetic in the UI, README and handoff, and never describe it as verified or real map data. Do not invent an external geocoding service.
+
+Use Prisma keyterm prompting only if the verified selected model and endpoint support it.
+
+Prisma v2.5 functionality must not depend on v3.0-only keyterm parameters.
+
+## 12.3 Provenance
+
+Persist:
+- Caller-provided location text.
+- Resolved candidate.
+- Coordinates.
+- Accuracy radius.
+- Match confidence.
+- Source.
+- Confirmation status.
+- Timestamp.
+
+GPS-derived facts use browser_gps provenance.
+
+Landmark matches use database_record provenance plus the original caller utterance reference.
+
+Never invent coordinates or improve recorded accuracy without evidence.
+
+If location remains unresolved:
+- Keep it unresolved.
+- Do not invent a nearby hospital.
+- Do not fabricate resource proximity.
+- Apply the pending_location rule in Section 10.3.
+- Preserve the incident and flag the unresolved location.
+
+A location is "confirmed" only when its confirmation status is confirmed by the caller. A GPS result within the 500 metre threshold is a location candidate, not a confirmed location, until the caller confirms it.
+
+---
+
+# 13. HOSPITAL DIRECTORY AND SCORING
+
+Implement hospital selection in:
+
+orchestrator/hospital.py
+
+Use verified public hospital directory information only after its source is approved.
+
+Every hospital record must retain:
+- Hospital name.
+- Coordinates.
+- Address.
+- Verified facility capabilities.
+- Source URL or identifier.
+- Verification date.
+- Relevant provenance.
+
+Never fabricate:
+- Bed availability.
+- ICU availability.
+- Emergency acceptance.
+- Current capacity.
+- Live hospital readiness.
+
+Directory information is not live operational availability.
+
+## 13.1 Eligibility filters
+
+Apply hard eligibility filters before ranking.
+
+Examples:
+- Required emergency capability.
+- Verified trauma capability.
+- Verified ICU capability where relevant.
+
+Use only attributes present in verified records.
+
+## 13.2 Weighted scoring
+
+Apply deterministic weighted scoring after eligibility filtering.
+
+Components:
+
+- Geographic distance.
+- Travel ETA.
+- Capability fit.
+
+Weights must be configuration-driven and approved by the lead engineer.
+
+Do not invent numerical weights.
+
+Validate that configured weights are valid, non-negative and sum to 1.0 within a documented floating-point tolerance (for example math.isclose with an explicit absolute tolerance). Never compare the sum with exact float equality.
+
+For each hospital, record:
+- Component scores.
+- Active weights.
+- Weighted contribution.
+- Final score.
+
+If a verified routing ETA is unavailable:
+- Do not invent an ETA.
+- Mark it unavailable.
+- Re-normalise weights across available components.
+- Disclose the adjusted methodology.
+- Do not claim ETA was considered.
+
+If a demo-only simulated ETA is used, label it simulated everywhere.
+
+## 13.3 Hospital ranking UI
+
+For every candidate, display:
+
+- Hospital name.
+- Distance.
+- ETA with an explicit source or simulation label.
+- Capability fit.
+- Distance component score.
+- ETA component score, if available.
+- Capability component score.
+- Applied weight for every active component.
+- Weighted contribution of each component.
+- Final score.
+- Data source and verification date.
+
+The user must understand why a hospital ranks above another.
+
+Never describe a directory suggestion as a confirmed accepting hospital.
+
+---
+
+# 14. DUPLICATE-INCIDENT DETECTION
+
+Implement in:
+
+orchestrator/duplicates.py
+
+Flag a new incident as a possible duplicate when all conditions hold:
+
+1. Same normalised emergency type.
+2. Confirmed incident coordinates within 200 metres.
+3. Incident creation timestamps within 5 minutes.
+
+"Normalised" means mapped to the fixed taxonomy in Section 9. Incidents whose category is `unknown` are not compared for duplicate detection until they are reclassified to a supported category.
+
+Use PostGIS for distance calculations.
+
+Use suitable indexes for incident time and location queries.
+
+### When detection runs
+
+An incident does not yet have a category or a confirmed location when it is created. Duplicate detection therefore runs synchronously at the first moment BOTH of the following are true for the incident:
+- It has a supported category at or above the confidence threshold.
+- It has a confirmed location (Section 12.3).
+
+It must re-run whenever the category or confirmed location changes. Each run is idempotent: it must not create duplicate flags or duplicate audit events for the same incident pair and rule. The query is bounded to the 5-minute window and the 200-metre radius to keep it fast.
+
+Do not use uncertain coordinates as confirmed duplicate evidence.
+
+When a match is found:
+
+- Set possible_duplicate = true.
+- Record matched incident ID.
+- Record distance.
+- Record time difference.
+- Record the match rule.
+- Set control_room_review_required = true.
+- Create an audit event.
+
+Never automatically merge incidents.
+
+Do not delete the new incident.
+
+Do not automatically cancel assignments.
+
+Do not assume nearby emergencies are the same event.
+
+The simulated reviewer must be able to inspect both incidents and decide whether to associate them.
+
+---
+
+# 15. STAY WITH ME
+
+STAY WITH ME is a core product feature.
+
+It is a continuous safety and reassurance layer, not simply a list of instructions.
+
+Responsibilities:
+- Calm conversational delivery.
+- Reassurance without false promises.
+- Relevant follow-up questions.
+- Explanation of what SETU is doing.
+- Honest simulated dispatch updates.
+- Approved safety instruction selection.
+- Adaptation to new caller information.
+- Language continuity.
+- Conversational continuity until completion or handoff.
+
+Do not diagnose the caller or an injured person.
+
+Do not provide free-form first-aid or medical advice.
+
+## 15.1 Approved instruction library
+
+Implement:
+
+orchestrator/instructions.py
+
+Maintain a versioned, reviewed instruction library.
+
+Each instruction must include:
+- Instruction ID.
+- Emergency category.
+- Language.
+- Approved text.
+- Approved source.
+- Review date.
+- Version.
+
+The backend computes the set of eligible instruction IDs from the incident category and active language. The reasoning model may only select an ID from that backend-provided eligible set; the policy layer rejects any other ID.
+
+Instruction text must be drawn from identified official public guidance sources and reviewed by the lead engineer. Never label an instruction as medically or clinically reviewed unless a qualified reviewer has actually reviewed it and that review is recorded.
+
+## 15.2 Pre-synthesized instruction audio
+
+This is mandatory.
+
+Pre-synthesize approved fixed safety and reassurance instructions once for each supported language and configured voice/model combination.
+
+Do not synthesize fixed instruction lines through Timbre on every call.
+
+Use:
+
+backend/app/scripts/presynthesize_instructions.py
+
+Pre-synthesize:
+- Safety instructions.
+- Standard reassurance lines.
+- Holding phrases.
+- Standard status explanations.
+- Language-specific approved phrases.
+- Generic provider-outage reassurance phrases.
+- Provider-blocked prompts, including the "describe it again in your own words" prompt and the required statement in Section 9.4.
+- The "Sorry, I didn't catch that. Please say that again." phrase.
+- The spoken prototype disclosure for each supported language.
+
+Store versioned audio assets in persistent storage.
+
+Example:
+
+backend-media/instructions/<language>/<instruction_id>/<version>.<format>
+
+Maintain an asset manifest containing:
+- Instruction ID.
+- Language.
+- Voice.
+- Timbre version.
+- Text version.
+- Audio format.
+- File location or object key.
+- Checksum.
+- Generation timestamp.
+- Generation status.
+
+Cache identity must include text version, language, voice and model version.
+
+If text changes, regenerate.
+
+If model or voice changes, regenerate.
+
+Default v2.5 assets must use supported plain-text synthesis.
+
+Use v3.0 expressive tags only when account access and endpoint support have been verified.
+
+## 15.3 Runtime playback
+
+During a session:
+- Retrieve pre-synthesized audio.
+- Play cached audio directly.
+- Avoid additional Timbre requests on a cache hit.
+- Record playback and cache-hit metrics.
+
+If an asset is missing:
+- Never invent or improvise a safety instruction.
+- Use approved visible text where appropriate.
+- Use live TTS only for the same approved text and only if the provider is available.
+- Record the cache miss.
+
+The normal path must use cached audio.
+
+This reduces TTFAB and provider credit consumption.
+
+Dynamic caller-specific conversational responses may still use live Timbre synthesis.
+
+## 15.4 Reasoning outage and blocked-response reassurance fallback
+
+STAY WITH ME must remain available whenever the reasoning provider is unavailable or blocks a response.
+
+Two distinct conditions exist and must keep distinct reason codes:
+- `reasoning_unavailable`: outage, timeout, disconnect, authentication failure, quota exhaustion or rate limiting.
+- `provider_blocked_emergency_content`: a safety-filter block, filter, truncation or empty response, handled by the escalation in Section 9.4.
+
+When either condition occurs during an active session:
+
+1. Preserve the incident and session state.
+2. Record the provider failure with its distinct error code.
+3. Stop dynamic reasoning-based instruction selection for that turn.
+4. Use a predefined, pre-approved sequence of generic reassurance phrases from the instruction library.
+5. Play the corresponding pre-synthesized audio for the active language where available.
+6. Do not generate new instructions dynamically.
+7. Do not invent an emergency classification.
+8. Resume normal reasoning-based selection as follows. Until Gate 0.12 resolves a provider health-probe mechanism, resume on the next turn that returns a schema-valid response. After Gate 0.12, follow its approved probe cadence.
+9. Flagging:
+   - For `reasoning_unavailable`: set control_room_review_required = true with reason `reasoning_unavailable` immediately and create an audit event.
+   - For `provider_blocked_emergency_content`: follow the staged escalation in Section 9.4 (info audit on the first block, then the fallback and warning flag at the Nth consecutive block). Do not use the reason code `reasoning_unavailable` for blocks.
+10. Do not create any resource assignment solely because of an outage unless the lead engineer approves such a policy (Gate 0.12). Blocks are governed by Section 9.4, which does create the deterministic fallback assignment. If an assignment already exists, preserve it.
+
+Example approved generic phrases:
+
+"I'm here with you. Please stay on the line while this simulation continues."
+
+"This is a prototype and is not connected to real emergency services."
+
+If a simulated assignment has actually been persisted:
+
+"A simulated resource assignment has been created in this demo."
+
+Never say that real-world help has been requested or dispatched.
+
+A provider outage or block must not cause the caller to lose all reassurance.
+
+The sequence cadence, repetition limit and escalation after a prolonged outage are configured by the lead engineer (Gate 0.12).
+
+---
+
+# 16. SPEAK WHILE WAITING
+
+The caller must not experience unexplained silence during known slow operations.
+
+For a finalized and validated request that requires a potentially slow lookup, play a relevant pre-synthesized holding phrase before executing the lookup.
+
+Examples:
+
+"I'm checking the nearby hospital directory now."
+
+"I'm checking which simulated resources are available."
+
+"I'm confirming the location you described."
+
+Required sequence:
+
+1. Finalize the caller's utterance.
+2. Validate intent and facts.
+3. Identify the next approved backend operation.
+4. Start playback of the cached holding phrase.
+5. Start the authorised backend lookup immediately after playback begins.
+6. Let the lookup execute asynchronously.
+7. Deliver the result through the session orchestrator.
+
+Do not wait for the complete phrase to finish before starting the lookup.
+
+Do not use phrases that claim a real resource was contacted.
+
+Use holding phrases only when the operation is expected to take noticeable time.
+
+Do not play them unnecessarily for fast local operations.
+
+If interrupted, follow the exact barge-in sequence.
+
+Never start speculative tool execution before utterance finalization and validation.
+
+---
+
+# 17. LANGUAGE SWITCHING
+
+The caller may switch between Telugu, Hindi and English during a session.
+
+Rules:
+
+- Detect language changes at utterance boundaries, starting from the first caller utterance.
+- This is not speaker diarization.
+- Preserve the same incident and session.
+- Use verified Prisma language metadata where available.
+- If unavailable, use validated transcript-language detection.
+- Do not assume v2.5 returns v3.0-only metadata.
+- Configure the next Timbre response using supported language and voice options.
+- Do not restart the session.
+
+If language confidence is insufficient, ask for repetition or confirmation.
+
+Language switching must not clear prior facts or create another incident.
+
+---
+
+# 18. BARGE-IN, CONTINUOUS MICROPHONE BUFFERING AND ECHO SAFETY
+
+Barge-in is mandatory.
+
+The caller must be able to interrupt SETU while it is speaking.
+
+## 18.1 Continuous microphone capture and buffering
+
+This is a non-negotiable client requirement.
+
+The browser client must continuously capture and buffer incoming microphone audio throughout an active session.
+
+This includes:
+- Periods when SETU is listening.
+- Periods when SETU is processing.
+- Periods when live Timbre audio is playing.
+- Periods when cached instruction or holding audio is playing.
+
+Do not stop microphone capture during TTS playback.
+
+Do not wait until the playback finishes before starting to capture microphone input.
+
+Use a bounded, in-memory rolling audio ring buffer.
+
+The ring buffer must:
+- Continuously receive AudioWorklet microphone frames.
+- Preserve the audio immediately preceding a detected interruption.
+- Preserve the first frames of genuine caller speech.
+- Continue buffering until the interruption is handed to the session pipeline.
+- Have a configurable bounded duration and memory limit.
+- Avoid unbounded memory growth.
+- Avoid persistent raw-audio storage.
+- Be cleared or rotated according to the session privacy policy.
+
+Default buffer configuration:
+- Pre-roll: 1500 ms.
+- Total ring buffer duration: 10 seconds.
+- Format: 16 kHz mono PCM, 16-bit.
+- Approximate memory: 320 KB per session at default settings.
+
+Both values are configurable.
+
+The continuous local buffer is what makes interruption capture possible.
+
+Do not send unfinished or speculative utterances to operational backend tools.
+
+### Interim sequential design (pending Gate 0.4)
+
+Until Gate 0.4 confirms that Prisma and Timbre may run concurrently, SETU uses a sequential design: Prisma streaming is paused during TTS playback. The ring buffer holds audio continuously, and once the barge-in sequence completes, the buffer is forwarded to Prisma. If Gate 0.4 verifies safe concurrent operation, this interim design may be revised with the lead engineer's approval; do not assume concurrency before then.
+
+During TTS playback, the client must maintain the rolling buffer so that genuine speech can be preserved and forwarded after the barge-in sequence.
+
+The client must not lose the beginning of the interruption while cancelling playback.
+
+## 18.2 Default microphone assumption
+
+The initial demo assumes headphones or a headset.
+
+Speakerphone operation is not a guaranteed supported mode until it passes acoustic echo testing.
+
+Request these browser microphone constraints:
+
+echoCancellation: true
+noiseSuppression: true
+autoGainControl: true
+channelCount: 1
+
+These are requests, not guarantees.
+
+Inspect actual microphone track settings.
+
+Do not claim echo cancellation is active merely because it was requested.
+
+Use AudioWorklet to produce 16 kHz mono PCM for the selected provider interface.
+
+Do not assume browser hardware capture is already 16 kHz.
+
+## 18.3 Echo policy
+
+- Prefer headphones for the default demo.
+- Use browser acoustic echo cancellation where available.
+- Test whether Timbre audio leaks into the microphone.
+- Do not treat VAD activation alone as proof of genuine caller speech.
+- Do not claim speakerphone support without testing.
+
+If echo cancellation is unavailable, inactive or fails testing:
+- Require headphones.
+- Disable automatic VAD-triggered barge-in for that session.
+- Provide a manual interrupt control.
+
+## 18.4 Mandatory barge-in sequence
+
+When genuine caller speech interrupts SETU:
+
+1. Detect the interruption using processed microphone input.
+2. STOP LOCAL AUDIO PLAYBACK IMMEDIATELY.
+3. Clear all queued, not-yet-played TTS audio chunks.
+4. Cancel the active server-side Timbre generation task, if one exists.
+5. Close or abort the live provider streaming connection according to its verified contract, if one exists.
+6. Confirm server-side teardown where a server operation was active.
+7. Send the preserved caller audio buffer, including pre-roll and interruption audio, to Prisma.
+8. Continue the same session and incident.
+
+### Critical ordering rule
+
+Stopping local playback must happen before network cancellation.
+
+For example, stop active AudioBufferSourceNode instances synchronously.
+
+Do not wait for:
+- Server cancellation.
+- A network acknowledgement.
+- WebSocket teardown.
+- Timbre generation completion.
+
+The caller must stop hearing SETU immediately.
+
+Server cancellation happens afterwards.
+
+### Cached playback special case
+
+A pre-synthesized cached holding or safety phrase has no active Timbre generation task.
+
+In that case:
+- Stop local playback immediately.
+- Clear queued chunks.
+- The server-side generation cancellation step is a no-op.
+- There may be no live provider connection to close.
+- Continue with buffered audio preservation and forwarding.
+
+Never send an unnecessary cancellation request for a cached asset.
+
+### Additional requirements
+
+- Do not allow old queued audio to play after interruption.
+- Preserve sufficient pre-roll audio.
+- Cancellation must be safe and idempotent.
+- Respect provider concurrency restrictions.
+- Do not assume Prisma and Timbre requests can remain active simultaneously.
+
+### False-trigger handling
+
+Local playback must stop immediately on VAD activation, so a false trigger (cough, noise, echo leak) can interrupt SETU without genuine speech following.
+
+Whether a barge-in produced genuine speech is determined only from the signal Prisma actually provides for silence, low-confidence audio and non-speech input, as verified and recorded at Gate 0.1. Do not invent a detection heuristic.
+
+Until Gate 0.1 verifies a reliable signal:
+- Treat every barge-in as genuine caller speech.
+- If Prisma returns an empty or unusable transcript, play the approved cached phrase "Sorry, I didn't catch that. Please say that again."
+- Do not count this as a caller utterance, a classification attempt, a timeout response or a provider-blocked turn.
+
+If Gate 0.1 finds no reliable signal for non-speech input, this policy must be redesigned with the lead engineer before implementation.
+
+Once a reliable signal is verified, and the preserved buffer is reported as non-speech or empty:
+- Record a `false_barge_in` audit event.
+- Do not count the event as a caller utterance, a classification attempt, a timeout response or a provider-blocked turn.
+- If the interrupted audio was a cached asset (an approved instruction, holding phrase or standard line), replay that approved phrase from its beginning (not from the middle) using the cached asset.
+- If the interrupted audio was live Timbre synthesis of a dynamic response, do NOT replay it. Live audio is not recoverable. No client-side replay buffer is held. Record the event and continue to the next turn. Any pending follow-up question stays pending and the orchestrator re-asks it on the next turn.
+- If false triggers repeat beyond a configured limit within a session, disable automatic VAD-triggered barge-in for that session and provide the manual interrupt control (consistent with Section 18.3).
+
+## 18.5 Mandatory tests
+
+Test:
+- Caller interrupts during live TTS.
+- Caller interrupts during cached audio playback.
+- Microphone buffering remains active during TTS.
+- First interruption frames are preserved.
+- Caller speaks while SETU is silent.
+- SETU audio leaks into microphone.
+- Headphones are disconnected.
+- Echo cancellation is unavailable.
+- Echo cancellation is requested but not enabled.
+- Local playback stops before network cancellation.
+- Queued audio never resumes.
+- Cached playback does not trigger an unnecessary server cancellation.
+- Live TTS cancellation is attempted.
+- Prisma receives the preserved buffer.
+- Provider concurrency restrictions are respected.
+- No self-interruption loop occurs.
+- Before Gate 0.1 verification, an empty or unusable transcript after barge-in plays the "didn't catch that" phrase and is not counted as an utterance.
+- After verification, a false barge-in during cached playback replays the approved phrase from its beginning.
+- A false barge-in during live TTS does not replay, and the pending follow-up question is re-asked on the next turn.
+
+A failed acoustic test must trigger the documented fallback.
+
+---
+
+# 19. CALLER RESPONSE TIMEOUT
+
+A silent caller is not necessarily unconscious.
+
+Timeout behaviour:
+
+1. Detect a configurable silence period.
+2. Play a gentle check-in prompt.
+3. Wait for a response.
+4. Record the timeout event.
+5. If there is no response, flag the incident for simulated control-room review.
+6. Preserve incident state.
+7. Preserve existing simulated assignments.
+8. Continue according to the approved timeout policy.
+
+The timeout policy parameters are: silence period before the first check-in, number of check-ins, wait after each check-in, and the maximum idle time after which the session is closed ("timeout exhaustion"). These values must be approved by the lead engineer (Gate 0.11) and are configurable. Do not invent defaults.
+
+Never automatically:
+- Diagnose unconsciousness.
+- Declare death.
+- Cancel simulated assignments.
+- Mark an incident resolved.
+- Infer injury from silence.
+
+Silence must never increment the unknown-classification counter or the provider-blocked counter.
+
+If the session ends while the consecutive unknown counter equals one and no supported category has been established, the session-ending fallback in Section 9.3 applies. If it ends after a provider-blocked turn with no supported category, Section 9.4 applies.
+
+---
+
+# 20. STRUCTURED INCIDENT HANDOFF
+
+Generate a structured handoff for every completed or reviewed incident.
+
+Implement in:
+
+orchestrator/handoff.py
+
+Include:
+
+- Incident ID.
+- Session ID.
+- Incident category.
+- Classification attempt count.
+- Classification confidence per attempt.
+- Provider-blocked turn count and fallback reason where applicable.
+- Reported severity indicators.
+- Original caller statements.
+- Confirmed facts.
+- Source utterance IDs for extracted facts.
+- Backend provenance references.
+- Unanswered questions.
+- Conflicting information.
+- Confirmed location.
+- Location source.
+- Accuracy radius.
+- Location confidence.
+- Affected-person count if known.
+- Required resource categories.
+- Simulated assignments.
+- Simulated assignment statuses.
+- Simulated ETAs where available.
+- Hospital directory suggestions.
+- Hospital score breakdown.
+- Possible duplicate flag.
+- Possible false/prank flag.
+- Control-room review flags with their reason codes.
+- Full event timeline.
+- Session completion status.
+
+Do not invent missing values.
+
+Handoffs must be generated and persisted during the active session, while transcript content is available.
+
+If a handoff is regenerated after the transcript retention period has expired, it may include provenance IDs and metadata but must explicitly mark transcript content as "not retained."
+
+Every LLM-extracted fact must retain provenance.
+
+Backend-generated facts must retain their own source provenance.
+
+The handoff is not a medical diagnosis or an official emergency-service report.
+
+---
+
+# 21. DATABASE DESIGN AND AUDIT
+
+Use PostgreSQL 16 with PostGIS and pg_trgm.
+
+The database must support:
+
+- Sessions.
+- Session state transitions.
+- Session event sequences.
+- Incidents.
+- Transcript segments.
+- Extracted facts and provenance.
+- Incident review flags.
+- Possible duplicate references.
+- Landmarks, with source and synthetic-or-approved labelling.
+- Hospital directory records.
+- Hospital score breakdowns.
+- Synthetic resources.
+- Synthetic resource assignments.
+- Approved instruction versions.
+- Audio asset manifests.
+- Append-only audit events.
+
+Use foreign keys, constraints and indexes.
+
+Use migrations.
+
+Audit events reference sessions, incidents and other entities by pseudonymous ID without cascading foreign keys to deletable personal-data tables, so retention deletion never requires mutating or blocking on audit records.
+
+## 21.1 Session persistence
+
+PostgreSQL is the authoritative source of truth.
+
+Persist important state transitions before publishing the result to the frontend.
+
+Use transactions where a state transition and associated event must commit together.
+
+Support WebSocket reconnection using session identity and the last event sequence.
+
+Prevent duplicate event processing.
+
+## 21.2 Append-only audit enforcement
+
+Append-only must be enforced at the database level.
+
+Do not rely only on application conventions.
+
+Use separate database roles.
+
+Migration/owner role:
+- Owns schema objects.
+- Creates tables, triggers and migrations.
+
+Runtime application role:
+- Can SELECT and INSERT audit events.
+- Cannot UPDATE audit events.
+- Cannot DELETE audit events.
+- Cannot TRUNCATE audit events.
+- Does not own the audit table.
+
+Apply explicit PostgreSQL permission restrictions.
+
+Add database triggers that reject:
+- UPDATE.
+- DELETE.
+- TRUNCATE.
+
+The application runtime role must not be able to disable or remove these triggers.
+
+If an audit record needs correction, append a new corrective event.
+
+Never modify historical audit entries.
+
+## 21.3 Audit information
+
+Record timestamps for:
+- Session creation.
+- Final transcript events.
+- Reasoning-model analysis.
+- Provider-blocked turns and outage events.
+- Fact validation.
+- Backend tool requests.
+- Location queries.
+- Hospital queries.
+- Resource lookups.
+- Simulated assignment creation.
+- Holding phrase playback.
+- TTS first byte.
+- Barge-in (including false barge-in).
+- TTS cancellation.
+- Timeouts.
+- Duplicate detection.
+- Reclassification.
+- Incident flag changes.
+- Session completion.
+
+Record:
+- Session correlation ID.
+- Incident ID.
+- Event type.
+- Severity (info, warning or critical).
+- Timestamp.
+- Outcome.
+- Error code and reason code where applicable.
+- Provenance references.
+
+Redact PII before writing persistent audit records.
+
+## 21.4 Retention and deletion
+
+Persistent transcript and other personal data must have a documented, configurable retention policy.
+
+They must be deletable:
+- On session closure where the configured policy requires it.
+- When their configured retention period expires.
+- Through an authorised deletion workflow.
+
+Separate transcript content and personal data from immutable audit event metadata.
+
+The audit log must not contain unnecessary raw audio or unrestricted transcript content.
+
+Audit records should retain pseudonymous IDs and event metadata rather than duplicate personal data.
+
+Deleting retained transcript content must not require mutating historical append-only audit records.
+
+Document the retention configuration and deletion behaviour.
+
+---
+
+# 22. PRIVACY AND DEMONSTRATION DATA
+
+The public demo must use synthetic caller data and synthetic emergency incidents.
+
+Do not use:
+- Real emergency caller records.
+- Real phone numbers.
+- Aadhaar numbers.
+- PAN numbers.
+- Private recordings without consent.
+- Real dispatch records.
+
+The microphone and location require explicit permission.
+
+Collect only necessary information.
+
+Disclose, on the initial screen and in the README, which third-party providers process caller audio and transcripts: Gnani (Prisma speech-to-text and Timbre text-to-speech) and Google (Gemini API reasoning, which receives transcripts and dialogue context: prior utterances, extracted facts and the pending follow-up question).
+
+Avoid retaining raw audio beyond short-lived processing buffers unless explicitly authorised and necessary.
+
+Separate transient audio handling from persistent transcript and audit handling.
+
+Do not store API keys in frontend code or browser local storage.
+
+Do not log credentials.
+
+---
+
+# 23. BACKEND VALIDATION AND TOOL EXECUTION
+
+All operational actions are executed by the backend.
+
+The reasoning model cannot execute arbitrary application tools.
+
+Every proposed extraction or operation must pass:
+
+1. Pydantic schema validation.
+2. Session ownership validation.
+3. Incident ownership validation.
+4. Session state validation.
+5. Permission validation.
+6. Source provenance validation.
+7. Idempotency validation.
+8. Backend policy validation.
+
+Every LLM-extracted fact must contain a valid source_utterance_id.
+
+Never weaken this requirement to "where applicable."
+
+Backend-generated facts must contain appropriate typed provenance.
+
+The backend generates all operational identifiers and results.
+
+## 23.1 Internal parallel lookups
+
+Independent internal lookups may execute in bounded parallel operations.
+
+Target:
+
+2 seconds for the bounded internal lookup group.
+
+Use explicit cancellation and cleanup.
+
+If a lookup exceeds its deadline:
+- Mark it pending or unavailable.
+- Do not invent a result.
+- Record its timeout.
+- Continue only where the current session state permits it.
+
+Do not apply a universal two-second timeout to every external provider request.
+
+Prisma, the reasoning model and Timbre have separate configured timeout budgets based on verified contracts.
+
+## 23.2 External API retry policy
+
+Use an explicit bounded policy.
+
+Maximum automatic retry count:
+
+ONE RETRY.
+
+For idempotent unary external operations only, retry once when the failure is plausibly transient:
+- Temporary connection failure.
+- HTTP 408.
+- HTTP 429.
+- HTTP 5xx.
+
+Default retry delay:
+
+250 milliseconds.
+
+If the provider supplies a valid Retry-After value:
+- Honour it.
+- Retry only if it fits within the remaining operation deadline.
+- Otherwise fail without retrying.
+
+Do not retry:
+- Authentication errors.
+- Invalid request errors.
+- Unsupported features.
+- Schema validation failures.
+- Provider safety-filter blocks.
+- Permanent client errors.
+- Operations that cannot safely be repeated.
+
+For streaming Prisma or Timbre connections:
+- Do not automatically restart interrupted streams.
+- Resume only if the provider explicitly documents a safe resumable protocol.
+- Otherwise close the failed stream and use a safe recovery path.
+- Ask the caller to repeat lost audio when necessary.
+
+For non-idempotent database writes:
+- Use idempotency keys.
+- Prevent duplicate assignments.
+- Never retry blindly.
+
+Internal lookup timeout does not imply a second automatic attempt.
+
+Never use unbounded retries.
+
+---
+
+# 24. OBSERVABILITY AND TTFAB
+
+Measure real performance.
+
+Instrument:
+- Prisma partial-transcript latency.
+- Prisma final-transcript latency.
+- Reasoning-model processing latency.
+- Reasoning-model token usage, rate-limit responses and provider-block events where the provider reports them.
+- Database lookup latency.
+- Hospital ranking latency.
+- Resource lookup latency.
+- Assignment creation latency.
+- Timbre first-audio-byte latency.
+- Local cached-audio playback start.
+- End-to-end conversational response latency.
+- Barge-in local stop latency.
+- Server-side cancellation latency.
+
+Create a TTFAB debugging overlay.
+
+Keep engineering diagnostics separate from the main caller interface.
+
+Report cached instruction playback separately from live Timbre TTFAB.
+
+Do not count an already synthesized holding phrase as a successful new model generation.
+
+Track:
+- Cached phrase lookup time.
+- Cached phrase playback start.
+- Live Timbre first byte.
+- Full conversational response latency.
+- Cache hit rate.
+
+Record sample counts for all reported metrics.
+
+Do not invent performance numbers.
+
+---
+
+# 25. FRONTEND EXPERIENCE
+
+Use React, Vite and TypeScript.
+
+The UI is an emergency coordination dashboard, not a generic chatbot.
+
+## 25.1 Dashboard language
+
+The initial dashboard interface is English-only.
+
+Voice interaction must support the verified Telugu, Hindi and English speech capabilities.
+
+Do not assume the dashboard itself must switch languages.
+
+UI localisation is outside the initial scope unless explicitly approved.
+
+## 25.2 Initial screen
+
+Include:
+- SETU identity.
+- Prototype disclaimer.
+- 112 non-replacement notice.
+- Third-party processing disclosure.
+- Voice language selector (English, Telugu, Hindi; default English), which determines the language of the spoken disclosure at session start.
+- Start demo.
+- Microphone permission explanation.
+- Location permission explanation.
+- Headphone recommendation.
+
+## 25.3 Live incident screen
+
+Display:
+- Session status.
+- Incident ID.
+- Transcript.
+- Incident category.
+- Unknown classification state when applicable.
+- Classification attempt count where useful.
+- Missing information.
+- Confirmed location.
+- GPS accuracy.
+- Landmark confirmation, with a visible "synthetic landmark data" label until Gate 0.7b is approved.
+- MapLibre map.
+- Simulated emergency resources.
+- Individual assignment statuses (including pending_location).
+- Simulated ETA labels.
+- Hospital directory suggestions.
+- Hospital ranking breakdown.
+- STAY WITH ME conversation.
+
+## 25.4 Hospital score breakdown
+
+For each hospital, visibly display:
+- Hospital name.
+- Distance.
+- ETA and its source.
+- Capability fit.
+- Distance score.
+- ETA score where available.
+- Capability score.
+- Applied weights.
+- Weighted component contributions.
+- Final score.
+- Directory source.
+- Verification date.
+
+Do not hide the scoring methodology.
+
+## 25.5 Control-room simulation
+
+Provide a simulated review interface.
+
+It must show:
+- Unknown-emergency fallback flags.
+- Reclassification events.
+- Possible duplicate incidents.
+- Possible false/prank call flags.
+- Conflicting information.
+- Unconfirmed locations.
+- Resource lookup failures.
+- Reasoning-outage flags (`reasoning_unavailable`).
+- Provider-blocked flags (`provider_blocked_emergency_content`), shown distinctly from outage flags.
+- Timeout events.
+- Structured incident handoff.
+
+Allow reviewers to inspect flags without automatically merging or deleting incidents.
+
+Make it visually clear this is not a real emergency control room.
+
+## 25.6 Engineering diagnostics
+
+Expose:
+- Prisma latency.
+- Reasoning-model latency.
+- Timbre TTFAB.
+- Cached playback start.
+- Barge-in events.
+- Tool timeouts.
+- Provider usage metadata where available.
+- Provider-block counts.
+
+Do not clutter the caller-facing experience.
+
+## 25.7 Simulation disclosure
+
+Every simulated vehicle, resource, assignment, status and ETA must be clearly labelled.
+
+Never make synthetic assets look like verified live emergency vehicles.
+
+---
+
+# 26. EVALUATION DATASET AND TEST MATRIX
+
+Evaluation must be systematic.
+
+Do not report model accuracy or latency based on a handful of demonstrations.
+
+Build a synthetic evaluation set with two parts.
+
+## 26.0 Structure
+
+Part A — Single-utterance matrix (scenarios 1–10 below):
+
+10 scenarios × 4 language conditions = 40 utterances per speaker.
+
+The four language conditions are:
+
+1. Telugu.
+2. Hindi.
+3. English.
+4. Code-mixed speech.
+
+The code-mixed condition contains two sub-conditions: Telugu-English (Tanglish) and Hindi-English (Hinglish). Report sample counts for each sub-condition separately, and report the combined code-mixed figure only alongside them.
+
+Use short 2–3 second utterances for dedicated short-clip STT tests.
+
+Part B — Multi-turn scripted conversations (scenarios 11–12 below):
+
+These require context across turns and are not multiplied by language conditions. Script each as one or more multi-turn conversations (for example scenario 11 starts in one language and switches mid-session). Report them separately from the Part A matrix.
+
+Suggested scenario coverage:
+
+1. Medical emergency.
+2. Fire.
+3. Fire with reported injuries.
+4. Road accident.
+5. Building collapse and trapped persons.
+6. Physical threat or attack.
+7. Gas leak.
+8. Explosion.
+9. Unknown or ambiguous emergency.
+10. Poor GPS and spoken landmark resolution.
+11. Mid-session language switching (Part B).
+12. Possible duplicate or possible false/prank review (Part B).
+
+Include violence and injury descriptions (scenarios 4, 6 and 8) specifically so provider safety-filter behaviour is measured (Section 26.5).
+
+Use synthetic scripts and consented speakers.
+
+Never use real emergency recordings without authorisation.
+
+## 26.1 Minimum viable evaluation
+
+If the full matrix cannot be completed within available time, the following is the smallest publishable evaluation:
+
+- 6 scenarios × 3 language conditions × 2 speakers = 36 unique utterances.
+- The three language conditions are fixed as Telugu, Hindi and code-mixed. English is the condition dropped in the minimum viable case. Code-mixed MUST NOT be dropped.
+- The code-mixed condition (6 scenarios × 2 speakers = 12 utterances) is split evenly between Tanglish and Hinglish (6 utterances each), with each sub-condition reported separately.
+- Each utterance recorded for latency in 2 runs, giving 72 total measurement observations.
+
+This set supports overall percentile reporting only when at least 30 valid observations exist overall. It does not support per-language-condition percentiles: it yields 24 observations per language condition, which is below the 30-observation threshold in Section 26.4. Report per-language counts and mark per-language percentiles as insufficiently sampled.
+
+Anything smaller than this must be labelled "exploratory" and no percentile claims should be made.
+
+Do not silently shrink the evaluation set. Report exactly what was completed and what was not.
+
+## 26.2 Speaker diversity
+
+For each language condition, collect recordings from at least three distinct consented speakers where the full matrix is completed. In the minimum viable case, two distinct speakers per language condition.
+
+Where the English condition is included (full matrix), include at least two different accents.
+
+Do not base the entire evaluation on one speaker.
+
+Record anonymised speaker IDs for evaluation reproducibility.
+
+Avoid storing unnecessary personal information about participants.
+
+## 26.3 Ground truth
+
+For every utterance, maintain human-reviewed ground truth for:
+- Transcript.
+- Language.
+- Emergency category.
+- Extracted facts.
+- Expected resource categories.
+- Location information where present.
+- Missing information.
+- Expected fallback behaviour.
+
+Do not use model-generated transcripts as their own ground truth.
+
+Document code-mixed spelling and transcription normalisation.
+
+## 26.4 Repeated latency tests
+
+For latency measurements:
+- Run each evaluation utterance three times where practical (two runs in the minimum viable evaluation).
+- Record successful and failed requests.
+- Exclude warm-up runs from reported percentiles.
+- Keep environment and provider configuration fixed.
+- Report exact sample counts.
+
+For each language condition, report p50 and p95 only when at least 30 valid observations exist.
+
+Otherwise report the sample count and mark the percentile as insufficiently sampled.
+
+Do not imply a small evaluation set establishes statistically robust production performance.
+
+## 26.5 Metrics
+
+Speech recognition:
+- WER.
+- CER.
+- Per-language transcript accuracy.
+- Code-mixed transcript quality.
+
+Classification:
+- Accuracy.
+- Macro F1.
+- Per-category precision.
+- Per-category recall.
+- Unknown fallback correctness.
+- Provider-block rate per scenario and language condition, reported separately from classification accuracy.
+- Provider-block fallback correctness (the fallback fires at exactly N consecutive blocks and never earlier).
+
+Entity extraction:
+- Field-level precision.
+- Field-level recall.
+- Field-level F1.
+- Provenance coverage.
+
+Location:
+- GPS threshold handling accuracy.
+- Landmark candidate accuracy.
+- Confirmation rate.
+- Unresolved-location rate.
+
+Dispatch:
+- Correct deterministic resource mapping.
+- Multi-resource assignment correctness.
+- Unknown fallback correctness.
+- Duplicate assignment prevention.
+- Simulated assignment status correctness.
+
+Other:
+- Duplicate-incident detection results.
+- False/prank review flag handling.
+- Barge-in success rate.
+- Session recovery success.
+- Cached instruction hit rate.
+
+Latency:
+- Prisma finalization p50 and p95.
+- Reasoning-model p50 and p95.
+- Internal lookup p50 and p95.
+- Live Timbre TTFAB p50 and p95.
+- Cached playback start p50 and p95.
+- End-to-end conversational response p50 and p95.
+
+Never claim measured performance that has not actually been measured.
+
+---
+
+# 27. FAILURE HANDLING
+
+Handle:
+- Prisma unavailability.
+- Reasoning-model unavailability (`reasoning_unavailable`).
+- Reasoning-model response blocked, truncated or filtered by provider safety systems (`provider_blocked_emergency_content`).
+- Reasoning-model rate limiting or quota exhaustion.
+- Timbre unavailability.
+- Invalid credentials.
+- Quota exhaustion.
+- Rate limiting.
+- Provider disconnect.
+- Audio corruption.
+- Unsupported audio formats.
+- Database unavailability.
+- Poor GPS accuracy.
+- GPS permission denial.
+- Ambiguous landmarks.
+- Unavailable synthetic resources.
+- Hospital directory unavailability.
+- TTS cancellation failure.
+- Barge-in during synthesis.
+- False barge-in.
+- Empty or unusable transcript after barge-in.
+- Duplicate events.
+- Caller silence.
+- Session reconnect.
+- Backend process restart.
+- Missing cached instruction audio.
+
+Every failure must:
+- Have a defined state.
+- Have a recorded error event with a distinct reason code.
+- Avoid fabricated success.
+- Preserve prior valid incident state.
+- Be explained honestly.
+
+Do not silently swallow exceptions.
+
+Do not use bare except.
+
+Do not use mock provider data in production.
+
+The mock adapter is for automated testing only.
+
+A missing simulated resource must produce a pending or unavailable state, not a fake assignment.
+
+A reasoning-provider outage or blocked response must activate the pre-approved STAY WITH ME reassurance fallback.
+
+A technical outage or blocked response must not be mislabeled as an unknown classification, and a block must not be mislabeled as an outage.
+
+Repeated provider blocks must trigger the Section 9.4 fallback so that the caller never ends a session with no simulated response.
+
+Never claim real-world resources were contacted.
+
+---
+
+# 28. REQUIRED TESTS
+
+Tests must be written before implementation of each module.
+
+## 28.1 Adapter tests
+
+- Valid response parsing.
+- Invalid response parsing.
+- Missing fields.
+- Timeout.
+- Authentication error.
+- Rate limiting.
+- Provider disconnect.
+- Unsupported capabilities.
+- Cancellation.
+- Streaming cleanup.
+- Reasoning adapter maps a provider safety-filter block to a distinct integration-failure error, not a classification result.
+- Reasoning adapter maps an empty or truncated response to a distinct integration-failure error.
+- Reasoning adapter maps outage, quota and rate-limit failures to a different error from safety-filter blocks.
+
+## 28.2 Classification and provenance tests
+
+- Every supported emergency category.
+- Valid unknown classification.
+- Ambiguous classification.
+- First consecutive unknown result.
+- Second consecutive unknown result.
+- Unknown fallback after exactly two failed classifications.
+- No fallback after only one unknown result.
+- Supported category resets the counter.
+- Yes/no answers do not increment the counter.
+- Numeric answers do not increment the counter.
+- Acknowledgment utterances do not increment the counter.
+- utterance_role other than new_description never increments the counter.
+- Missing or invalid utterance_role is treated as schema-invalid.
+- Dialogue context is passed to the classification request.
+- Same utterance cannot increment the counter twice.
+- Invalid model response is not treated as a valid unknown result.
+- Provider outage is not treated as a valid unknown result.
+- Blocked, truncated or filtered provider response is not treated as a valid unknown result and does not increment the unknown counter.
+- Session ending with one unknown triggers fallback with reason `session_ended_before_second_attempt`.
+- The unknown fallback is applied at most once per incident across all triggers.
+- Confidence below threshold is treated as unknown.
+- Confidence at threshold is accepted.
+- Partial transcripts are never sent to the reasoning model.
+- Missing information remains null.
+- Conflicting information is preserved.
+- Every LLM-extracted fact has valid source_utterance_id.
+- Invalid provenance is rejected.
+- Backend facts use typed provenance.
+- Dynamic caller-facing text implying real-world dispatch is rejected and replaced by an approved phrase.
+
+## 28.2a Provider-blocked content tests
+
+- First blocked turn records an info `provider_blocked` audit event, plays the approved reassurance and re-ask prompt, and creates no flag and no assignment.
+- The Nth consecutive blocked turn (default N = 2) with no established category triggers the fallback: category `unknown`, ambulance assignment, review flag with reason `provider_blocked_emergency_content`, fallback reason `consecutive_provider_blocks`.
+- N is configurable, and the fallback fires at exactly N and never earlier.
+- A schema-valid response between blocks resets `consecutive_provider_blocks`.
+- Blocked turns never increment the unknown counter.
+- A blocked turn with an established supported category creates no new assignment and sets only a warning flag at the Nth block.
+- Further blocks after the fallback do not create additional assignments.
+- Session end after one blocked turn with no established category triggers the fallback with reason `session_ended_after_provider_block`.
+- Session end after blocks, where the fallback has already fired, creates no duplicate assignment.
+- Reason codes `provider_blocked_emergency_content` and `reasoning_unavailable` are never interchanged.
+- The required caller statement for the block fallback never claims real dispatch.
+- No keyword classifier exists unless approved at Gate 0.13.
+- A knife-attack scripted session (three consecutive blocked turns) ends with exactly one simulated ambulance assignment and a control-room flag.
+
+## 28.3 Dispatch tests
+
+- Every base deterministic mapping.
+- Unknown maps to ambulance.
+- No unapproved additional-resource rules.
+- Additional resources require explicit approved rules.
+- Required validated backend facts.
+- Reasoning model cannot add resources.
+- Multiple-resource allocation.
+- No resource available.
+- Duplicate assignment prevention.
+- Idempotency.
+- Concurrent incidents cannot claim the same synthetic resource.
+- No location candidate produces pending_location requirements and selects no resource.
+- Allocation proceeds once a location candidate exists.
+- Simulated ETA generated only by approved backend logic; null when no approved model exists.
+- Reclassification adds only missing categories.
+- Reclassification never cancels or modifies existing assignments.
+- Reclassification after the unknown fallback keeps the existing ambulance assignment.
+
+## 28.4 Location tests
+
+- GPS accuracy below 500 metres.
+- GPS accuracy exactly 500 metres.
+- GPS accuracy above 500 metres.
+- Accuracy missing.
+- Permission denied.
+- Poor accuracy triggers landmark path.
+- Exact landmark match.
+- Fuzzy match.
+- Multiple candidates.
+- Caller confirmation.
+- GPS within threshold is a candidate, not confirmed, until caller confirmation.
+- No match.
+- No invented coordinates.
+- Landmark records carry source and ingestion metadata.
+- Before Gate 0.7b approval, only the labelled synthetic landmark set is loaded and the UI shows the synthetic label.
+
+## 28.5 Hospital tests
+
+- Eligibility filters.
+- Verified directory attributes.
+- Weighted score calculation.
+- Weight sum validation within tolerance.
+- Negative weights rejected.
+- Distance calculation.
+- ETA available.
+- ETA unavailable.
+- Weight re-normalisation.
+- No invented hospital capacity.
+- No invented acceptance status.
+- Score breakdown consistency.
+- Source provenance retained.
+
+## 28.6 Duplicate and false/prank flag tests
+
+Duplicate:
+- Same type, within 200 metres and within 5 minutes.
+- Same type outside 200 metres.
+- Same type outside 5 minutes.
+- Different emergency types.
+- Unknown category is excluded until reclassified.
+- Unconfirmed or inaccurate coordinates.
+- Detection does not run before both category and confirmed location exist.
+- Detection runs when the last of category or confirmed location becomes available.
+- Detection re-runs on category or location change without duplicating flags or audit events.
+- Duplicate flag does not automatically merge.
+- Duplicate flag does not cancel assignments.
+
+False/prank:
+- Flag creation.
+- Evidence reference.
+- Reviewer status update.
+- Audit event.
+- Reasoning model cannot declare a confirmed prank.
+- Silence does not trigger the flag.
+- Language difficulty does not trigger the flag.
+- Provider-blocked turns do not trigger the flag.
+- Flag does not suppress fallback dispatch.
+
+## 28.7 Instruction cache and outage tests
+
+- Pre-synthesis asset creation.
+- Manifest creation.
+- Correct language selection.
+- Cache hit.
+- Cache miss.
+- Text version change invalidates asset.
+- Model version change invalidates asset.
+- v2.5 plain-text compatibility.
+- v3.0 tags disabled when unsupported.
+- No unnecessary live Timbre call on cache hit.
+- Spoken disclosure plays at session start in the caller-selected language (default English).
+- Reasoning model can only select instruction IDs from the backend-provided eligible set.
+- Reasoning-provider outage activates generic reassurance.
+- Blocked or filtered reasoning response activates generic reassurance.
+- Reasoning-provider outage does not trigger dynamic instruction selection.
+- Reasoning-provider outage sets control-room review with reason `reasoning_unavailable` and creates no assignment.
+- Cached reassurance works without the reasoning model.
+- Until Gate 0.12 resolves a probe mechanism, normal selection resumes on the next schema-valid response.
+
+## 28.8 Barge-in tests
+
+- Microphone is continuously buffered during TTS.
+- Microphone is continuously buffered during cached audio.
+- Default pre-roll of 1500 ms is preserved.
+- Local playback stops first.
+- Queued chunks clear second.
+- Server cancellation happens afterwards.
+- Cached playback cancellation is a no-op.
+- Live connection closes according to verified contract.
+- Teardown is confirmed where applicable.
+- Caller pre-roll reaches Prisma.
+- Prisma streaming does not restart before teardown is confirmed.
+- Cancelled audio never plays again.
+- No self-interruption loop.
+- No false-barge-in detection heuristic exists beyond the verified Prisma signal.
+- Repeated false barge-ins disable automatic barge-in and enable manual interrupt.
+
+## 28.9 Persistence tests
+
+- WebSocket disconnect.
+- WebSocket reconnect.
+- Invalid or expired session token rejected.
+- Signing key is read from configuration, never from source or the frontend.
+- Event replay from last sequence.
+- Process restart.
+- Session restoration, including both counters.
+- Incident restoration.
+- No duplicate assignments after reconnect.
+- Unfinished audio requests repetition.
+- Append-only audit restrictions.
+- Database triggers reject UPDATE, DELETE and TRUNCATE.
+- Retention deletion does not mutate immutable audit events.
+- Regenerated handoff after transcript expiry marks content as not retained.
+
+## 28.10 Integration tests
+
+Run complete scripted sessions from start to finish.
+
+Test major emergency and language flows.
+
+Verify UI state matches authoritative backend state.
+
+---
+
+# 29. API CONTRACT GATES
+
+Resolve these gates before implementing the associated integrations.
+
+## GATE 0.1 — PRISMA
+
+Confirm:
+- Participant account access.
+- v2.5 availability.
+- v3.0 availability.
+- Exact endpoint.
+- Transport.
+- Authentication.
+- Streaming request schema.
+- Response schema.
+- Supported audio encoding.
+- Sample-rate requirements.
+- Language metadata.
+- v3 codemix parameter name and value.
+- Keyterm support.
+- How Prisma signals silence, low-confidence audio and non-speech input. Record the actual signal shape (empty string, confidence field, flag or a best-effort guess). If no reliable signal exists, the false-barge-in policy in Section 18.4 must be redesigned with the lead engineer before implementation. Do not invent a heuristic.
+
+## GATE 0.2 — TIMBRE
+
+Confirm:
+- Participant account access.
+- v2.5 availability.
+- v3.0 availability.
+- Exact endpoint.
+- Transport.
+- Authentication.
+- Output audio format.
+- Streaming behaviour.
+- Supported voices.
+- Supported languages.
+- v3 expressive audio-tag support.
+- Cancellation and teardown behaviour.
+
+## GATE 0.3 — REASONING MODEL (GEMINI API)
+
+Confirm:
+- API key access and the selected Gemini model identifier.
+- SDK or HTTP client version.
+- Billing, quota and rate limits for the account tier, including requests per minute and per day.
+- Structured-output support (JSON schema) for the selected model, including enum fields such as emergency category and utterance_role.
+- Whether tool or function calling is supported and needed. The backend, not the model, executes tools.
+- Safety-filter behaviour on realistic emergency descriptions in Telugu, Hindi, English and code-mixed text (including violence, weapons, bleeding and fire), and exactly how blocked, filtered, truncated or empty responses are signalled.
+- Whether safety thresholds are configurable for the account tier, which setting is the least restrictive permitted, and the measured block rate at that setting.
+- Data-usage and retention terms for the account tier (whether prompts or transcripts may be used for training or retained).
+- Supported generation configuration (temperature and related settings).
+- Latency on dialogue-context requests of realistic length.
+- Error behaviour.
+- Retry and timeout semantics.
+
+## GATE 0.4 — CONCURRENCY
+
+Confirm:
+- Maximum active participant-account requests.
+- Whether Prisma and Timbre can run concurrently.
+- Whether model requests share an account limit.
+- Cancellation acknowledgement.
+- Connection teardown requirements.
+- Behaviour after a cancelled stream.
+
+Do not assume concurrent operation is permitted.
+
+## GATE 0.5 — AUDIO PIPELINE
+
+Confirm:
+- Browser capture.
+- 16 kHz mono conversion.
+- AudioWorklet behaviour.
+- VAD integration.
+- Provider audio format.
+- TTS playback format.
+- Streaming chunk format.
+- Browser compatibility.
+- Pre-roll handling.
+- Continuous microphone buffer behaviour.
+- Local playback stop.
+- Server-side cancellation.
+
+## GATE 0.6 — LANGUAGE PILOT
+
+This gate is a bounded pilot, not the full evaluation.
+
+Run a pilot of short 2–3 second clips covering Telugu, Hindi, English, Tanglish and Hinglish, with at least two distinct consented speakers. The pilot size is set by the lead engineer. The full Section 26 matrix (or the Section 26.1 minimum) runs at the end of the build, not before implementation.
+
+Confirm:
+- Transcript accuracy on code-mixed clips.
+- Code-switch handling.
+- Partial transcript stability.
+- Final transcript quality.
+- Language metadata and language-identification reliability (decides whether Section 17 stays in scope or is demoted to future work).
+- v2.5 baseline behaviour.
+- v3.0 behaviour if actually available.
+
+## GATE 0.7 — HOSPITAL DIRECTORY DATA SOURCE
+
+Before creating hospital records, ask the lead engineer to approve the source.
+
+Resolve:
+- Exact data source.
+- Source URL or identifier.
+- Geographic coverage.
+- Data ownership.
+- Usage or licensing terms.
+- Last update date.
+- Fields actually provided.
+- Verification method.
+- Refresh process.
+
+Do not invent a verified hospital directory.
+
+If no approved source is available:
+- Stop hospital-directory ingestion.
+- Use only a clearly labelled synthetic development dataset for interface testing.
+- Do not describe that dataset as verified public data.
+
+Do not infer capacity or live availability.
+
+## GATE 0.7b — LANDMARK DATA SOURCE
+
+Before ingesting landmarks, ask the lead engineer to approve the source, using the same process as Gate 0.7.
+
+Resolve:
+- Exact data source (for example a synthetic set, OpenStreetMap or a government dataset).
+- Source URL or identifier.
+- Geographic coverage.
+- Licence and attribution terms.
+- Last update date.
+- Fields provided, including native-script and romanised names.
+- Transliteration approach for fuzzy matching (Section 12.2).
+- Refresh process.
+
+If no approved source is available, use only a clearly labelled synthetic landmark set (Section 12.2) and do not describe it as real map data.
+
+## GATE 0.8 — HOSPITAL SCORING, ROUTING AND RESOURCE ETA
+
+Confirm:
+- Approved score weights.
+- Distance score formula.
+- ETA source.
+- Whether routing is available.
+- How missing score components are handled.
+- Which directory attributes qualify for capability fit.
+- Whether synthetic resource ETAs use an approved formula (for example distance and a configured speed) or remain null.
+- The approved resource-selection criterion (default proposed in Section 10.3).
+
+Do not invent weights or ETA sources.
+
+Do not silently choose scoring weights.
+
+## GATE 0.9 — ADDITIONAL DISPATCH RULES
+
+Before implementing any resource expansion beyond the base mapping in Section 10.1, obtain explicit approval from the lead engineer.
+
+Confirm:
+- Complete emergency-fact-to-resource rule table.
+- Required validated fact fields.
+- Source provenance requirements.
+- Rule precedence.
+- Conflicting-fact behaviour.
+- Expected test cases.
+
+Until this gate is approved, implement only the exact base resource mapping.
+
+## GATE 0.10 — CLASSIFICATION CONFIDENCE THRESHOLD
+
+Confirm with the lead engineer:
+- The default classification confidence threshold (proposed default: 0.70).
+- Whether the threshold varies per emergency category.
+- Whether the threshold varies per language condition.
+- Whether the reasoning model returns calibrated confidence values.
+
+Until this gate is resolved, use the proposed default of 0.70.
+
+## GATE 0.11 — TIMEOUT POLICY
+
+Confirm with the lead engineer:
+- Silence period before the first check-in.
+- Number of check-ins and wait after each.
+- Maximum idle time before the session closes (timeout exhaustion).
+- Behaviour of the session after the control-room flag is raised.
+
+Do not invent defaults.
+
+## GATE 0.12 — REASONING-OUTAGE POLICY
+
+This gate covers outages (`reasoning_unavailable`) only. Provider-blocked content is governed by Section 9.4 and Gate 0.13.
+
+Confirm with the lead engineer:
+- Whether any simulated assignment should be created during a reasoning outage (for example a simulated ambulance after a configured period with the reason `reasoning_unavailable`), or whether the flag-only behaviour in Section 15.4 is final.
+- Provider health-probe mechanism and cadence.
+- Reassurance sequence cadence, repetition limit and escalation after a prolonged outage.
+
+Until this gate is resolved, apply the flag-only behaviour in Section 15.4, with resumption on the next schema-valid response.
+
+## GATE 0.13 — PROVIDER-BLOCKED EMERGENCY CONTENT POLICY
+
+Confirm with the lead engineer before any reasoning-adapter integration code is written:
+- N, the number of consecutive provider-blocked turns that triggers the deterministic fallback (proposed default: 2, matching the two-strike unknown rule; 3 is the alternative if earlier reviewer visibility is preferred over earlier assignment).
+- Whether a local deterministic keyword classifier for blocked turns is approved. If yes, the lead engineer supplies and approves the reviewed multilingual (Telugu, Hindi, English and romanised) keyword table and its mapping to the taxonomy. If no, it is not built.
+- The least-restrictive provider safety settings acceptable for the account (see Gate 0.3).
+- Approved wording and translations of the block fallback statement and prompts.
+
+Until this gate is resolved: N = 2, no keyword classifier, and the escalation in Section 9.4 applies.
+
+---
+
+# 30. IMPLEMENTATION WORKFLOW
+
+Follow these rules exactly.
+
+1. Tests first for every module.
+2. Small diffs.
+3. One module per response.
+4. Show tests before implementation.
+5. Explain the module's purpose.
+6. Add type annotations.
+7. Add docstrings to non-trivial functions.
+8. Document inputs, outputs and failure modes.
+9. Make every async operation cancellation-safe.
+10. Use explicit timeouts.
+11. Use typed exceptions.
+12. Avoid bare except.
+13. Do not silently insert placeholder logic.
+14. Use NotImplementedError for deliberately unfinished internal functionality.
+15. Never invent provider contracts.
+16. Do not refactor unrelated files.
+17. Do not introduce unapproved architecture changes.
+18. Run tests after each module.
+19. Keep the application runnable at reasonable milestones.
+20. Ask before changing a locked architectural decision.
+
+The first implementation must not contain a complete application dump.
+
+Build SETU incrementally.
+
+---
+
+# 31. FIRST TASK — NO CODE
+
+Do not create files.
+
+Do not write tests.
+
+Do not implement the orchestrator yet.
+
+Your first response must contain exactly these three deliverables.
+
+## 1. Architecture restatement
+
+One paragraph explaining your understanding of:
+
+- Prisma speech recognition.
+- Gemini-based classification and extraction.
+- Timbre speech synthesis.
+- Deterministic Python dispatch.
+- The two-unknown emergency fallback, the utterance_role rule and the confidence threshold.
+- Why a blocked or filtered provider response is not an unknown classification, and how consecutive provider blocks still guarantee a simulated ambulance assignment.
+- The distinct reason codes `reasoning_unavailable` and `provider_blocked_emergency_content`.
+- Dialogue-context requirement for classification.
+- The session-ending single-unknown fallback and the session-ending-after-block fallback.
+- Reclassification behaviour.
+- PostgreSQL persistence.
+- Location resolution, the 500-metre GPS threshold and the synthetic landmark default.
+- Hospital ranking and visible score breakdown.
+- Cached instruction audio and the caller-selected spoken-disclosure language.
+- Continuous microphone buffering with pre-roll, and the interim sequential design.
+- Immediate local playback termination during barge-in, and the false-barge-in policy (cached replay versus live no-replay).
+- Reasoning-outage reassurance.
+- Simulation and 112 boundaries.
+
+Do not redesign the system.
+
+## 2. Exactly three questions
+
+Ask three genuinely necessary questions before implementing the orchestrator.
+
+Prioritise:
+- Actual participant account API contracts.
+- Provider concurrency and cancellation.
+- Any essential session-flow detail that remains unspecified.
+
+Do not ask questions whose answers are already provided.
+
+Do not ask a long questionnaire.
+
+## 3. Proposed adapter method signatures
+
+Provide application-owned method signatures and docstrings only for:
+
+- STTAdapter.
+- ReasoningAdapter.
+- TTSAdapter.
+
+They must support:
+- Async streaming.
+- Typed input and output.
+- Structured reasoning with dialogue context, including the utterance_role field.
+- Distinct typed errors for provider-blocked, truncated or empty responses versus outage, quota and rate-limit failures.
+- A typed signal for Prisma non-speech or empty results, shaped only according to the contract verified at Gate 0.1.
+- Explicit timeouts.
+- Safe cancellation.
+- Session coordination.
+
+These are application-level interfaces, not claims about provider-native signatures.
+
+Do not write method bodies.
+
+Do not create files.
+
+Do not begin implementation until I answer.
+
+---
+
+# 32. FINAL ENGINEERING PRINCIPLES
+
+Accuracy over speed.
+
+Verified contracts over assumptions.
+
+Deterministic backend operations over LLM autonomy.
+
+Immediate local playback termination over delayed network cancellation.
+
+Continuous microphone buffering over missed interruptions.
+
+Bounded unknown-emergency fallback over endless clarification.
+
+A guaranteed simulated response over a silently filtered caller.
+
+Dialogue context over isolated-utterance classification.
+
+Confirmed location accuracy over invented precision.
+
+Auditable facts over ungrounded extraction.
+
+Separate provenance for caller facts and backend facts.
+
+Distinct reason codes over blended failure labels.
+
+Human-reviewed flags over automated accusations.
+
+Persistent incident state over ephemeral connections.
+
+Cached approved safety audio over unnecessary repeated synthesis.
+
+Reassurance during model outages over silent sessions.
+
+Measured latency over marketing claims.
+
+Explicit simulation over misleading presentation.
+
+SETU must demonstrate reliable voice AI engineering, safe orchestration, measurable performance and a genuinely working prototype.
+
+Do not expand the scope.
+
+Do not weaken these constraints.
+
+Do not invent functionality.
+
+Start with the three deliverables in Section 31.
+
+---
+
+# 33. DEFINITION OF DONE (PER MODULE)
+
+A module is done only when all of the following hold:
+1. Its tests were written before the implementation and now pass.
+2. All public functions have type annotations, and non-trivial functions have docstrings stating inputs, outputs and failure modes.
+3. Every async operation has an explicit timeout and is cancellation-safe.
+4. Every failure path produces a typed exception, a recorded audit or error event with a distinct reason code, and an honest caller-facing or reviewer-facing state.
+5. No unverified provider capability, parameter or endpoint is used.
+6. Every operational result is traceable to a database row, a backend rule or a provider response with typed provenance.
+7. Simulated assets are labelled as simulated wherever they surface.
+8. The change is small enough to review in one sitting, and the application still runs.
+
+---
+
+# 34. OPEN DECISIONS REGISTER
+
+Gate: decision needed, interim default until resolved.
+
+0.1 Prisma contract and non-speech signal: stop Prisma integration until resolved. Use the v2.5 baseline only. Treat every barge-in as genuine; no false-barge-in heuristic.
+0.2 Timbre contract: stop Timbre integration until resolved. Use plain-text v2.5 only.
+0.3 Gemini access, structured output, safety-filter behaviour and configurability, data terms: stop reasoning integration until resolved.
+0.4 Provider concurrency: assume NO concurrency. Sequential barge-in.
+0.5 Audio pipeline: headphones assumed. Manual interrupt as fallback.
+0.6 Language pilot: language switching (Section 17) is built last and is demoted to future work if language identification is unreliable.
+0.7 Hospital data source: synthetic labelled development dataset only.
+0.7b Landmark data source: synthetic labelled landmark set only.
+0.8 Scoring weights, ETA and resource selection: no ETA (null), nearest-available selection as proposed.
+0.9 Additional dispatch rules: base mapping only.
+0.10 Confidence threshold: 0.70.
+0.11 Timeout policy: no defaults invented. Lead engineer supplies values before timeout.py is implemented.
+0.12 Outage policy: flag-only with no outage-triggered assignment. Resume on the next schema-valid response.
+0.13 Provider-blocked content policy: N = 2 consecutive blocks trigger the ambulance fallback with reason `provider_blocked_emergency_content`. No keyword classifier.
