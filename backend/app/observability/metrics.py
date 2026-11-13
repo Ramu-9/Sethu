@@ -74,6 +74,11 @@ class MetricsRegistry:
         self._barge_in_count = 0
         self._false_barge_in_count = 0
         self._tool_timeout_count = 0
+        self._finalized_utterances_count = 0
+        self._gemini_requests_count = 0
+        self._duplicate_requests_prevented_count = 0
+        self._inflight_coalesced_count = 0
+        self._thinking_level_counts: dict[str, int] = {"LOW": 0, "MEDIUM": 0}
 
     def record_latency(self, metric_name: str, duration_ms: float) -> None:
         """Record a measured latency sample in milliseconds."""
@@ -88,12 +93,29 @@ class MetricsRegistry:
         *,
         prompt_tokens: int | None,
         completion_tokens: int | None,
+        thinking_level: str | None = None,
+        was_coalesced_or_cached: bool = False,
     ) -> None:
         with self._lock:
-            if prompt_tokens is not None and prompt_tokens > 0:
+            self._finalized_utterances_count += 1
+            if was_coalesced_or_cached:
+                self._duplicate_requests_prevented_count += 1
+            else:
+                self._gemini_requests_count += 1
+            if thinking_level in ("LOW", "MEDIUM"):
+                self._thinking_level_counts[thinking_level] = (
+                    self._thinking_level_counts.get(thinking_level, 0) + 1
+                )
+            if prompt_tokens is not None and prompt_tokens > 0 and not was_coalesced_or_cached:
                 self._prompt_tokens_total += prompt_tokens
-            if completion_tokens is not None and completion_tokens > 0:
+            if completion_tokens is not None and completion_tokens > 0 and not was_coalesced_or_cached:
                 self._completion_tokens_total += completion_tokens
+
+    def increment_duplicate_request_prevented(self, *, coalesced: bool = False) -> None:
+        with self._lock:
+            self._duplicate_requests_prevented_count += 1
+            if coalesced:
+                self._inflight_coalesced_count += 1
 
     def increment_provider_block(self) -> None:
         with self._lock:
@@ -163,6 +185,11 @@ class MetricsRegistry:
             for m in self.SUPPORTED_METRICS
         }
         with self._lock:
+            reqs_per_utt = (
+                round(self._gemini_requests_count / self._finalized_utterances_count, 4)
+                if self._finalized_utterances_count > 0
+                else None
+            )
             return {
                 "metrics": summaries,
                 "cache_hits": cache_hits,
@@ -170,6 +197,12 @@ class MetricsRegistry:
                 "cache_hit_rate": hit_rate,
                 "prompt_tokens_total": self._prompt_tokens_total,
                 "completion_tokens_total": self._completion_tokens_total,
+                "finalized_utterances_count": self._finalized_utterances_count,
+                "gemini_requests_count": self._gemini_requests_count,
+                "gemini_requests_per_finalized_utterance": reqs_per_utt,
+                "duplicate_requests_prevented_count": self._duplicate_requests_prevented_count,
+                "inflight_coalesced_count": self._inflight_coalesced_count,
+                "thinking_level_counts": dict(self._thinking_level_counts),
                 "rate_limit_count": self._rate_limit_count,
                 "provider_block_count": self._provider_block_count,
                 "barge_in_count": self._barge_in_count,

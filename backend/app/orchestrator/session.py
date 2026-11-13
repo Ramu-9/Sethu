@@ -183,6 +183,8 @@ class IncidentSessionState:
     identified_hazards: list[str] = field(default_factory=list)
     active_safety_guidance: dict[str, Any] | None = None
     task_execution_telemetry: dict[str, Any] = field(default_factory=dict)
+    superseded_facts: list[FactConflict] = field(default_factory=list)
+    location_history: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SessionOrchestrator:
@@ -223,6 +225,7 @@ class SessionOrchestrator:
         self._demo_mode = bool(demo_mode or getattr(dispatch_engine, "is_demo_mode", False))
         self._sessions: dict[UUID, IncidentSessionState] = {}
         self._session_locks: dict[tuple[UUID, int], asyncio.Lock] = {}
+        self._inflight_utterance_tasks: dict[tuple[UUID, UUID, int], asyncio.Future[IncidentSessionState]] = {}
 
     def _get_session_lock(self, session_id: UUID) -> asyncio.Lock:
         """Return an event-loop-local asyncio.Lock for the given session."""
@@ -661,7 +664,7 @@ class SessionOrchestrator:
         utterance_id: UUID,
         text: str,
         detected_language: SupportedLanguage | None = None,
-        timeout_seconds: float = 8.0,
+        timeout_seconds: float = 18.0,
         now: datetime | None = None,
     ) -> IncidentSessionState:
         """
@@ -671,14 +674,146 @@ class SessionOrchestrator:
         ts = now or datetime.now(timezone.utc)
         state = self.get_session(session_id)
 
-        # Prevent duplicate processing of the same finalized utterance (Section 9.3)
-        if utterance_id in state.processed_utterance_ids:
-            return state
-
         cleaned_text = text.strip()
         if not cleaned_text:
             return state
 
+        loop = asyncio.get_running_loop()
+        inflight_key = (session_id, utterance_id, id(loop))
+        existing_inflight = self._inflight_utterance_tasks.get(inflight_key)
+        if existing_inflight is not None:
+            self._metrics.increment_duplicate_request_prevented(coalesced=True)
+            return await asyncio.shield(existing_inflight)
+
+        # Prevent duplicate processing of the same finalized utterance (Section 9.3 & Requirement 1)
+        if utterance_id in state.processed_utterance_ids:
+            self._metrics.increment_duplicate_request_prevented(coalesced=False)
+            return state
+
+        fut: asyncio.Future[IncidentSessionState] = loop.create_future()
+        self._inflight_utterance_tasks[inflight_key] = fut
+        try:
+            res_state = await self._process_finalized_utterance_impl(
+                session_id=session_id,
+                state=state,
+                utterance_id=utterance_id,
+                cleaned_text=cleaned_text,
+                detected_language=detected_language,
+                timeout_seconds=timeout_seconds,
+                ts=ts,
+            )
+            if not fut.done():
+                fut.set_result(res_state)
+            return res_state
+        except BaseException as exc:
+            if not fut.done():
+                fut.set_exception(exc)
+                fut.exception()
+            raise
+        finally:
+            self._inflight_utterance_tasks.pop(inflight_key, None)
+
+    def _select_scoped_eligible_instruction_ids(
+        self,
+        state: IncidentSessionState,
+        utterance_text: str,
+    ) -> tuple[str, ...]:
+        """
+        Scope eligible instruction IDs to the established emergency category on routine follow-up turns
+        while retaining all category safety IDs when category is not yet established or when a new
+        cross-category hazard keyword appears in utterance_text.
+        """
+        eligible_instructions = self._instructions.get_eligible_instructions(
+            state.category,
+            state.active_language,
+        )
+        scoped_ids: list[str] = list(dict.fromkeys(i.instruction_id for i in eligible_instructions))
+        has_cross_category_cue = bool(
+            re.search(
+                r"\b(fire|flames?|smoke|burning|explo\w*|blast|collaps\w*|trapped|cylinder|lpg|gas|"
+                r"attack\w*|assault\w*|weapon|knife|accident|crash\w*|collid\w*|unconscious|fainted|"
+                r"aag|dhuan|behosh|ghayal|chot|manta|agni|spruha|pramadam)\b|"
+                r"(?:మంట|అగ్ని|పేలుడు|కూలి|సిలిండర్|దాడి|ప్రమాదం|స్పృహ|आग|विस्फोट|इमारत|सिलेंडर|हमला|दुर्घटना|बेहोश)",
+                utterance_text.lower(),
+                re.I,
+            )
+        )
+        if not state.category_established_above_threshold or has_cross_category_cue:
+            for cat in EmergencyCategory:
+                for inst in self._instructions.get_eligible_instructions(cat, state.active_language):
+                    if inst.instruction_id not in scoped_ids:
+                        scoped_ids.append(inst.instruction_id)
+        else:
+            if state.category == EmergencyCategory.FIRE:
+                for inst in self._instructions.get_eligible_instructions(
+                    EmergencyCategory.FIRE_WITH_INJURIES, state.active_language
+                ):
+                    if inst.instruction_id not in scoped_ids:
+                        scoped_ids.append(inst.instruction_id)
+            if "gas_cylinder" in state.identified_hazards and "safety_fire_gas_cylinder_01" not in scoped_ids:
+                scoped_ids.append("safety_fire_gas_cylinder_01")
+        return tuple(scoped_ids)
+
+    @staticmethod
+    def _build_session_memory_summary(state: IncidentSessionState) -> dict[str, Any]:
+        """Build complete structured session memory summary so bounded turn windows never lose context."""
+        loc = state.location_state
+        confirmed_loc_label = (
+            (loc.resolved_label or loc.caller_location_text)
+            if loc is not None
+            else None
+        )
+        answered_questions = [
+            {
+                "target_field": q.target_field,
+                "question": q.question_text,
+                "answered_by_utt": str(q.answered_by_utterance_id) if q.answered_by_utterance_id else None,
+            }
+            for q in state.question_history
+            if q.status == "answered"
+        ]
+        answered_fields = sorted({q.target_field for q in state.question_history if q.status == "answered"})
+        superseded_items = [
+            {
+                "field": c.field_name,
+                "prior_value": c.prior_value,
+                "prior_utt": str(c.prior_utterance_id),
+                "new_value": c.new_value,
+                "new_utt": str(c.new_utterance_id),
+            }
+            for c in (state.superseded_facts or state.conflicts)
+        ]
+        active_assignments = [
+            {
+                "vehicle_id": a.resource_id,
+                "category": a.category.value,
+                "status": a.status.value,
+                "lifecycle_status": a.lifecycle_status,
+                "eta_minutes": a.remaining_eta_minutes or a.simulated_eta_minutes,
+            }
+            for a in state.assignments
+        ]
+        return {
+            "confirmed_location_label": confirmed_loc_label,
+            "location_history": list(state.location_history),
+            "answered_target_fields": answered_fields,
+            "answered_questions": answered_questions,
+            "superseded_facts": superseded_items,
+            "active_assignments": active_assignments,
+            "required_resources": [c.value for c in state.required_resource_categories],
+        }
+
+    async def _process_finalized_utterance_impl(
+        self,
+        *,
+        session_id: UUID,
+        state: IncidentSessionState,
+        utterance_id: UUID,
+        cleaned_text: str,
+        detected_language: SupportedLanguage | None,
+        timeout_seconds: float,
+        ts: datetime,
+    ) -> IncidentSessionState:
         # Language switching at utterance boundary without restarting incident (Section 17)
         if detected_language in ("en", "te", "hi") and detected_language != state.active_language:
             prev_lang = state.active_language
@@ -703,16 +838,22 @@ class SessionOrchestrator:
             finalized_at=ts,
         )
 
-        eligible_instructions = self._instructions.get_eligible_instructions(
-            state.category,
-            state.active_language,
-        )
-        all_eligible_ids = list({i.instruction_id for i in eligible_instructions})
-        # Include all category safety IDs so initial classification can pick its matching category instruction
+        scoped_prompt_ids = self._select_scoped_eligible_instruction_ids(state, cleaned_text)
+        all_eligible_ids_list: list[str] = list(scoped_prompt_ids)
         for cat in EmergencyCategory:
             for inst in self._instructions.get_eligible_instructions(cat, state.active_language):
-                if inst.instruction_id not in all_eligible_ids:
-                    all_eligible_ids.append(inst.instruction_id)
+                if inst.instruction_id not in all_eligible_ids_list:
+                    all_eligible_ids_list.append(inst.instruction_id)
+        all_eligible_ids = tuple(all_eligible_ids_list)
+        session_mem_summary = self._build_session_memory_summary(state)
+        session_mem_summary["prompt_scoped_instruction_ids"] = list(scoped_prompt_ids)
+        loc_confirmed_bool = bool(
+            state.location_state is not None
+            and state.location_state.confirmation_status == LocationConfirmationStatus.CONFIRMED
+        )
+        sim_assigned_count = len(
+            [a for a in state.assignments if a.status == AssignmentStatus.SIMULATED_ASSIGNED]
+        )
 
         context = DialogueContext(
             session_id=state.session_id,
@@ -722,16 +863,19 @@ class SessionOrchestrator:
             validated_facts=tuple(state.validated_facts),
             current_utterance=current_record,
             pending_followup_question=state.pending_followup_question,
-            eligible_instruction_ids=tuple(all_eligible_ids),
+            eligible_instruction_ids=all_eligible_ids,
             backend_status_summary={
-                "assignments_count": len([a for a in state.assignments if a.status == AssignmentStatus.SIMULATED_ASSIGNED]),
-                "required_categories": [c.value for c in state.required_resource_categories],
+                "assignments_count": sim_assigned_count,
+                "simulated_assignments_count": sim_assigned_count,
+                "required_categories": ",".join(c.value for c in state.required_resource_categories),
                 "location_confirmation_status": (
                     state.location_state.confirmation_status.value
                     if state.location_state
                     else "unresolved"
                 ),
+                "location_confirmed": str(loc_confirmed_bool).lower(),
                 "category": state.category.value,
+                "current_category": state.category.value,
                 "allocation_mode": "DEMO" if self._demo_mode else "STRICT",
             },
             conversation_history=tuple(state.conversation_history),
@@ -742,6 +886,7 @@ class SessionOrchestrator:
                 if state.active_safety_guidance and state.active_safety_guidance.get("instruction_id")
                 else None
             ),
+            session_memory_summary=session_mem_summary,
         )
 
         async with self._get_session_lock(session_id):
@@ -792,6 +937,8 @@ class SessionOrchestrator:
             self._metrics.record_token_usage(
                 prompt_tokens=validated_output.prompt_tokens,
                 completion_tokens=validated_output.completion_tokens,
+                thinking_level=getattr(validated_output, "thinking_level", "LOW"),
+                was_coalesced_or_cached=bool(getattr(validated_output, "was_coalesced_or_cached", False)),
             )
         except ProviderBlockedContentError as blocked_err:
             self._metrics.increment_provider_block()
@@ -1026,10 +1173,33 @@ class SessionOrchestrator:
                 validated_output.proposed_followup_question,
                 target_field_hint=validated_output.proposed_followup_target_field,
             )
+            # If the model proposed a redundant question that was filtered out (e.g., re-asking injuries in Scenario A/B),
+            # dynamically select the next truly missing personalized question if one is needed.
+            dynamic_replacement_q: str | None = None
+            if validated_output.proposed_followup_question and filtered_followup is None:
+                _, _, _, cand_next_q, _ = deterministic_demo_classify_and_extract(
+                    text=cleaned_text,
+                    utterance_id=utterance_id,
+                    active_language=state.active_language,
+                    existing_category=state.category,
+                    existing_established=state.category_established_above_threshold,
+                    existing_facts=state.validated_facts,
+                    pending_followup_question=None,
+                    pending_question=None,
+                    question_history=state.question_history,
+                    active_assignments=state.assignments,
+                )
+                dynamic_replacement_q = self._filter_redundant_followup(state, cand_next_q)
+                filtered_followup = dynamic_replacement_q
+
             self._set_pending_question(
                 state,
                 question_text=filtered_followup,
-                target_field_hint=validated_output.proposed_followup_target_field,
+                target_field_hint=(
+                    validated_output.proposed_followup_target_field
+                    if dynamic_replacement_q is None
+                    else None
+                ),
                 source_utterance_id=utterance_id,
                 now=ts,
             )
@@ -1088,6 +1258,15 @@ class SessionOrchestrator:
                             "branches": branches_telemetry,
                             "degraded_branches": degraded_branches,
                             "fleet_availability": fleet_avail,
+                            "gemini_reasoning": {
+                                "thinking_level": getattr(validated_output, "thinking_level", "LOW"),
+                                "prompt_tokens": validated_output.prompt_tokens,
+                                "completion_tokens": validated_output.completion_tokens,
+                                "latency_ms": validated_output.latency_ms,
+                                "was_coalesced_or_cached": bool(
+                                    getattr(validated_output, "was_coalesced_or_cached", False)
+                                ),
+                            },
                             "gates_enforced": ["unknown_fallback_gate", "location_confirmation_gate"],
                         }
                         return state
@@ -1154,8 +1333,10 @@ class SessionOrchestrator:
                     state,
                     safe_text,
                     validated_output.proposed_followup_question,
-                    state.pending_followup_question,
+                     None if dynamic_replacement_q is not None else state.pending_followup_question,
                 )
+                if dynamic_replacement_q and dynamic_replacement_q.lower() not in safe_text.lower():
+                    safe_text = f"{safe_text} {dynamic_replacement_q}".strip()
             if was_replaced:
                 self._audit.append(
                     AuditEvent.create(
@@ -1214,6 +1395,15 @@ class SessionOrchestrator:
                 "branches": branches_telemetry,
                 "degraded_branches": degraded_branches,
                 "fleet_availability": fleet_avail,
+                "gemini_reasoning": {
+                    "thinking_level": getattr(validated_output, "thinking_level", "LOW"),
+                    "prompt_tokens": validated_output.prompt_tokens,
+                    "completion_tokens": validated_output.completion_tokens,
+                    "latency_ms": validated_output.latency_ms,
+                    "was_coalesced_or_cached": bool(
+                        getattr(validated_output, "was_coalesced_or_cached", False)
+                    ),
+                },
                 "gates_enforced": [
                     "location_confirmation_gate"
                     if any(a.status == AssignmentStatus.PENDING_LOCATION for a in state.assignments)
@@ -1591,12 +1781,12 @@ class SessionOrchestrator:
             return "consciousness_status"
         if re.search(r"injur|hurt|trapped|bleed|burn|గాయ|घायल", q):
             return "injuries_reported"
+        if re.search(r"safe\s+location|safe\s+distance|safe\s+spot|somewhere\s+safe|clear\s+of\s+danger|సురక్షిత|सुरक्षित", q):
+            return "caller_safe_spot_status"
         if re.search(r"confirm.*location|is this where you are|pin|నిర్ధార|లొకేషన్|कन्फर्म|लोकेशन", q):
             return "location_confirmed"
         if re.search(r"where|location|address|landmark|street|area|ల్యాండ్|ప్రాంతం|స్థలం|स्थान|लैंडमार्क|कहाँ", q):
             return "caller_location_text"
-        if re.search(r"safe\s+spot|somewhere\s+safe|clear\s+of\s+danger|సురక్షిత|सुरक्षित", q):
-            return "caller_safe_spot_status"
         return "general_followup"
 
     def _resolve_pending_question_from_utterance(
@@ -1913,6 +2103,28 @@ class SessionOrchestrator:
             replaced = False
             for idx, existing in enumerate(state.validated_facts):
                 if existing.field_name == fact.field_name:
+                    # Preserve superseded fact history and provenance when value changes
+                    if existing.value != fact.value and existing.source_utterance_id != fact.source_utterance_id:
+                        is_compatible_loc_refinement = bool(
+                            fact.field_name == "caller_location_text"
+                            and isinstance(existing.value, str)
+                            and isinstance(fact.value, str)
+                            and existing.value.lower() in fact.value.lower()
+                        )
+                        sup_conflict = FactConflict(
+                            field_name=fact.field_name,
+                            prior_value=existing.value,
+                            prior_utterance_id=existing.source_utterance_id,
+                            new_value=fact.value,
+                            new_utterance_id=fact.source_utterance_id,
+                            description=(
+                                "location_refinement"
+                                if is_compatible_loc_refinement
+                                else "caller_corrected_or_updated_fact"
+                            ),
+                        )
+                        if sup_conflict not in state.superseded_facts:
+                            state.superseded_facts.append(sup_conflict)
                     state.validated_facts[idx] = fact
                     replaced = True
                     break
@@ -1921,6 +2133,16 @@ class SessionOrchestrator:
 
         effective_loc_text = new_combined or new_landmark or new_broad
         if effective_loc_text and loc_utt_id is not None:
+            if not state.location_history or state.location_history[-1].get("location_text") != effective_loc_text:
+                state.location_history.append(
+                    {
+                        "location_text": effective_loc_text,
+                        "broad_area_text": new_broad or existing_broad,
+                        "landmark_text": new_landmark,
+                        "source_utterance_id": str(loc_utt_id),
+                        "recorded_at": now.isoformat(),
+                    }
+                )
             location_changed_after_confirm = bool(
                 was_confirmed_previously
                 and prior_loc_snapshot
@@ -2017,7 +2239,8 @@ class SessionOrchestrator:
             return None
 
         if (
-            any(k in confirmed_keys for k in ("caller_location_text", "location", "landmark", "address", "location_confirmed"))
+            inferred_target != "caller_safe_spot_status"
+            and any(k in confirmed_keys for k in ("caller_location_text", "location", "landmark", "address", "location_confirmed"))
             and "caller_location_text" not in conflict_fields
             and re.search(
                 r"\b(where|location|address|landmark|street|area)\b|ల్యాండ్|ప్రాంతం|స్థలం|स्थान|लैंडमार्क|कहाँ",
@@ -2194,6 +2417,8 @@ class SessionOrchestrator:
             existing_facts=state.validated_facts,
             pending_followup_question=state.pending_followup_question,
             pending_question=state.pending_question_record,
+            question_history=state.question_history,
+            active_assignments=state.assignments,
         )
         pre_facts, was_answered = self._resolve_pending_question_from_utterance(
             state,

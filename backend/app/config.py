@@ -9,7 +9,6 @@ Loads environment variables with explicit defaults and strict validation for:
 """
 
 from dataclasses import dataclass
-import glob
 import os
 from pathlib import Path
 
@@ -36,7 +35,7 @@ _PLACEHOLDER_VALUES = {
 
 
 def _read_repo_dotenv(merged: dict[str, str]) -> None:
-    """Fill missing or placeholder runtime values from repository .env when present."""
+    """Apply repository .env values (overriding stale container defaults when non-placeholder)."""
     dotenv_path = Path(__file__).resolve().parents[2] / ".env"
     if not dotenv_path.is_file():
         return
@@ -48,7 +47,7 @@ def _read_repo_dotenv(merged: dict[str, str]) -> None:
             key, val = line.split("=", 1)
             k = key.strip()
             v = val.strip().strip('"').strip("'")
-            if k and (k not in merged or merged[k] in _PLACEHOLDER_VALUES.get(k, {""})):
+            if k and v and v not in _PLACEHOLDER_VALUES.get(k, {""}):
                 merged[k] = v
     except Exception:
         return
@@ -56,50 +55,11 @@ def _read_repo_dotenv(merged: dict[str, str]) -> None:
 
 def get_runtime_env_map() -> dict[str, str]:
     """
-    Return the effective runtime environment dictionary.
-    When invoked from a CLI subprocess that does not inherit the platform secret
-    injection directly in os.environ, reads repository .env and (on Linux) /proc/[0-9]*/environ
-    without ever logging or printing secret values.
+    Return the effective runtime environment dictionary from os.environ and repository .env
+    without scanning unrelated processes or logging secret values.
     """
     merged: dict[str, str] = dict(os.environ)
     _read_repo_dotenv(merged)
-
-    gemini_val = merged.get("GEMINI_API_KEY", "").strip()
-    prisma_val = merged.get("PRISMA_AUTH_TOKEN", "").strip()
-    db_val = merged.get("DATABASE_URL", "").strip()
-    if (
-        gemini_val
-        and gemini_val not in _PLACEHOLDER_VALUES["GEMINI_API_KEY"]
-        and prisma_val
-        and db_val
-        and db_val not in _PLACEHOLDER_VALUES["DATABASE_URL"]
-    ):
-        return merged
-
-    for env_file in sorted(glob.glob("/proc/[0-9]*/environ")):
-        try:
-            raw = Path(env_file).read_bytes()
-            proc_env: dict[str, str] = {}
-            for entry in raw.split(b"\x00"):
-                if b"=" in entry:
-                    k_bytes, v_bytes = entry.split(b"=", 1)
-                    proc_env[k_bytes.decode("utf-8", errors="ignore")] = v_bytes.decode(
-                        "utf-8", errors="ignore"
-                    )
-            cand_gemini = proc_env.get("GEMINI_API_KEY", "").strip()
-            cand_prisma = proc_env.get("PRISMA_AUTH_TOKEN", "").strip()
-            if (
-                cand_gemini
-                and cand_gemini not in _PLACEHOLDER_VALUES["GEMINI_API_KEY"]
-                or cand_prisma
-            ):
-                for key, val in proc_env.items():
-                    if key not in merged or merged[key] in _PLACEHOLDER_VALUES.get(key, {""}):
-                        merged[key] = val
-                break
-        except Exception:
-            continue
-
     return merged
 
 
@@ -123,6 +83,7 @@ class Settings:
     migration_database_url: str = (
         "postgresql+asyncpg://setu_owner:setu_owner_dev_password@localhost:5432/setu"
     )
+    gemini_fallback_api_keys: tuple[str, ...] = ()
 
 
 def _parse_bool(raw: str | None, default: bool = False) -> bool:
@@ -163,6 +124,22 @@ def load_settings(env_override: dict[str, str] | None = None) -> Settings:
     if gemini_key in _PLACEHOLDER_VALUES["GEMINI_API_KEY"]:
         gemini_key = ""
 
+    fallback_keys: list[str] = []
+    explicit_fallback = env.get("GEMINI_FALLBACK_API_KEY", "").strip()
+    if (
+        explicit_fallback
+        and explicit_fallback not in _PLACEHOLDER_VALUES["GEMINI_API_KEY"]
+        and explicit_fallback != gemini_key
+    ):
+        fallback_keys.append(explicit_fallback)
+
+    raw_secret = env.get(
+        "SETU_SESSION_TOKEN_SECRET",
+        "setu-local-dev-hmac-secret-2026-key",
+    ).strip()
+    if not raw_secret or "dont know" in raw_secret.lower():
+        raw_secret = "120f71a45e80ac7c03547a55cf4633e344334c86359e813af33ca245b347852e"
+
     return Settings(
         database_url=env.get(
             "DATABASE_URL",
@@ -175,10 +152,7 @@ def load_settings(env_override: dict[str, str] | None = None) -> Settings:
                 "postgresql+asyncpg://setu_owner:setu_owner_dev_password@localhost:5432/setu",
             ),
         ),
-        session_token_secret=env.get(
-            "SETU_SESSION_TOKEN_SECRET",
-            "setu-local-dev-hmac-secret-2026-key",
-        ),
+        session_token_secret=raw_secret,
         gemini_api_key=gemini_key,
         gemini_model_id=env.get("GEMINI_MODEL_ID", "gemini-3.8-flash").strip() or "gemini-3.8-flash",
         prisma_endpoint_url=env.get("PRISMA_ENDPOINT_URL", "").strip(),
@@ -190,4 +164,5 @@ def load_settings(env_override: dict[str, str] | None = None) -> Settings:
         gate_0_3_gemini_verified=_parse_bool(env.get("GEMINI_GATE_0_3_VERIFIED"), False),
         hospital_weights=hospital_weights,
         timeout_policy=timeout_policy,
+        gemini_fallback_api_keys=tuple(fallback_keys),
     )

@@ -183,7 +183,7 @@ class TestEvaluationSuiteAndCapabilityProfile(unittest.TestCase):
         Section 26.5: Live evaluation runner refuses to produce fabricated numbers when Gates 0.1-0.3
         are open, and succeeds only when all three gates and credentials are configured.
         """
-        default_settings = load_settings()
+        default_settings = load_settings(env_override={})
         with self.assertRaises(EvaluationGateBlockedError):
             verify_live_gates_before_measurement(default_settings)
 

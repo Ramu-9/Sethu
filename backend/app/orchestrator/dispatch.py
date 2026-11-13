@@ -505,7 +505,13 @@ class DispatchEngine:
     ) -> tuple[ResourceCategory, ...]:
         """
         Deterministically evaluate compound multi-hazard resource requirements while
-        preserving single-category BASE_DISPATCH_MAPPING contracts (Gate 0.9).
+        preserving single-category BASE_DISPATCH_MAPPING contracts (Gate 0.9 & Requirement 7).
+
+        Policy for compound vehicle collision + fire/gas-cylinder + injuries:
+        - Fire engine: Required.
+        - Ambulance: Required.
+        - Police: Only when an explicit configured condition requires it (e.g., assault/violence/weapon,
+          explosion, building collapse, pure road_accident without fire override, or explicit police request).
         """
         base = list(self.determine_required_categories(category))
         normalized_hazards = {
@@ -522,24 +528,65 @@ class DispatchEngine:
             normalized_hazards.add("fire")
         if any(kw in lower_ctx for kw in ("cylinder", "lpg", "gas", "सिलेंडर", "సిలిండర్")):
             normalized_hazards.add("gas_cylinder")
-        if any(kw in lower_ctx for kw in ("injur", "bleed", "burn", "hurt", "casualt", "घायल", "గాయ")):
+        if any(kw in lower_ctx for kw in ("injur", "bleed", "burn", "hurt", "casualt", "unconscious", "घायल", "గాయ", "बेहोश", "స్పృహ")):
             normalized_hazards.add("injuries")
         if any(kw in lower_ctx for kw in ("trapped", "collapse", "debris", "collapsed")):
             normalized_hazards.add("trapped_persons")
 
-        # Preserve strict single-category mapping when there is at most one hazard domain
-        extra: list[ResourceCategory] = list(base)
+        explicit_police_condition = bool(
+            normalized_hazards.intersection(
+                {"assault", "physical_attack", "violence", "weapon", "explosion", "police_required", "crime"}
+            )
+            or any(
+                kw in lower_ctx
+                for kw in (
+                    "attack",
+                    "assault",
+                    "weapon",
+                    "knife",
+                    "gun",
+                    "fight",
+                    "violence",
+                    "explosion",
+                    "blast",
+                    "send police",
+                    "need police",
+                    "call police",
+                    "పోలీస్",
+                    "पुलिस",
+                )
+            )
+            or category in (
+                EmergencyCategory.PHYSICAL_ATTACK,
+                EmergencyCategory.EXPLOSION,
+                EmergencyCategory.BUILDING_COLLAPSE,
+                EmergencyCategory.GAS_LEAK,
+            )
+        )
+
+        # If a road collision also has active fire/gas-cylinder hazard, fire + medical take priority
+        # and police is only dispatched when an explicit configured police condition holds.
+        has_fire_or_cylinder = bool(normalized_hazards.intersection({"fire", "gas_cylinder"}))
+        if (
+            category == EmergencyCategory.ROAD_ACCIDENT
+            and has_fire_or_cylinder
+            and not explicit_police_condition
+        ):
+            extra: list[ResourceCategory] = [ResourceCategory.FIRE_ENGINE, ResourceCategory.AMBULANCE]
+        else:
+            extra = list(base)
+
         if len(normalized_hazards) >= 2:
             if "fire" in normalized_hazards or "gas_cylinder" in normalized_hazards or "gas_leak" in normalized_hazards:
                 extra.append(ResourceCategory.FIRE_ENGINE)
-            if "injuries" in normalized_hazards or "medical_trauma" in normalized_hazards or "vehicle_collision" in normalized_hazards or "road_accident" in normalized_hazards:
-                extra.append(ResourceCategory.AMBULANCE)
             if (
-                "vehicle_collision" in normalized_hazards
+                "injuries" in normalized_hazards
+                or "medical_trauma" in normalized_hazards
+                or "vehicle_collision" in normalized_hazards
                 or "road_accident" in normalized_hazards
-                or "explosion" in normalized_hazards
-                or "assault" in normalized_hazards
             ):
+                extra.append(ResourceCategory.AMBULANCE)
+            if explicit_police_condition:
                 extra.append(ResourceCategory.POLICE_PATROL)
             if "trapped_persons" in normalized_hazards or "building_collapse" in normalized_hazards:
                 extra.append(ResourceCategory.FIRE_AND_RESCUE)

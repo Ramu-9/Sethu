@@ -573,8 +573,38 @@ export default function App() {
   const sileroVadRef = useRef<SileroVadDetector | null>(null);
   const isTtsPlayingRef = useRef<boolean>(false);
   const vadActiveSpeechStreamingRef = useRef<boolean>(false);
+  const isTurnProcessingRef = useRef<boolean>(false);
+  const processingWatchdogRef = useRef<number | null>(null);
   const micStreamSeqRef = useRef<number>(0);
   const vadFinalizeSentAtRef = useRef<number | null>(null);
+
+  const clearTurnProcessingState = () => {
+    isTurnProcessingRef.current = false;
+    if (processingWatchdogRef.current !== null) {
+      window.clearTimeout(processingWatchdogRef.current);
+      processingWatchdogRef.current = null;
+    }
+  };
+
+  const armTurnProcessingWatchdog = () => {
+    isTurnProcessingRef.current = true;
+    if (processingWatchdogRef.current !== null) {
+      window.clearTimeout(processingWatchdogRef.current);
+    }
+    processingWatchdogRef.current = window.setTimeout(() => {
+      isTurnProcessingRef.current = false;
+      processingWatchdogRef.current = null;
+      vadFinalizeSentAtRef.current = null;
+      setIsReasoningThinking(false);
+      setVoiceState((prev) =>
+        prev === 'transcribing' || prev === 'understanding'
+          ? sessionStatusRef.current === 'active'
+            ? 'listening'
+            : 'idle'
+          : prev,
+      );
+    }, 15000);
+  };
 
   // Barge-In, Echo Cancellation & Continuous Ring Buffer State
   const ringBufferRef = useRef<ContinuousAudioRingBuffer>(new ContinuousAudioRingBuffer());
@@ -1014,14 +1044,19 @@ export default function App() {
       setIsTtsPlaying(playing);
       isTtsPlayingRef.current = playing;
       setTtsPlaybackSource(srcType);
+      if (!playing) {
+        ringBufferRef.current.clear();
+      }
     });
 
     // Initialize Silero VAD detector
     const vad = new SileroVadDetector(
       {
-        positiveSpeechThreshold: 0.5,
-        negativeSpeechThreshold: 0.35,
-        silenceTimeoutMs: 620,
+        positiveSpeechThreshold: 0.62,
+        negativeSpeechThreshold: 0.40,
+        minSpeechDurationMs: 380,
+        redemptionFrames: 4,
+        silenceTimeoutMs: 700,
       },
       {
         onReadyChange: (ready, error) => {
@@ -1029,7 +1064,7 @@ export default function App() {
           setVadError(error);
         },
         onSpeechStart: () => {
-          if (sessionStatusRef.current !== 'active') {
+          if (sessionStatusRef.current !== 'active' || isTurnProcessingRef.current) {
             return;
           }
           const activeSid =
@@ -1046,12 +1081,14 @@ export default function App() {
             }
             setIsTtsPlaying(false);
             isTtsPlayingRef.current = false;
+            ringBufferRef.current.clear();
             if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
               wsRef.current.send(
                 JSON.stringify({
                   type: 'barge_in',
                   session_id: activeSid,
                   barge_in_mode: 'genuine_speech',
+                  preserve_active_stream: false,
                   was_playing_cached_instruction: stopRes?.wasPlayingCachedInstruction ?? true,
                   local_stop_latency_ms: stopRes?.localStopLatencyMs ?? 1.2,
                 }),
@@ -1097,6 +1134,7 @@ export default function App() {
             return;
           }
           vadActiveSpeechStreamingRef.current = false;
+          sileroVadRef.current?.reset();
           if (sessionStatusRef.current !== 'active') {
             return;
           }
@@ -1105,6 +1143,7 @@ export default function App() {
               ? sessionIdRef.current
               : undefined;
           vadFinalizeSentAtRef.current = performance.now();
+          armTurnProcessingWatchdog();
           setVoiceState('transcribing');
           setStreamingPartialText('Understanding what you shared…');
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -1113,10 +1152,13 @@ export default function App() {
                 type: 'audio_chunk_pcm16',
                 session_id: activeSid,
                 finalize_utterance: true,
-                vad_finalize_ms: 620,
+                vad_finalize_ms: 700,
                 pcm_base64: '',
               }),
             );
+          } else {
+            clearTurnProcessingState();
+            setVoiceState('listening');
           }
         },
         onVADMisfire: () => {
@@ -1128,7 +1170,7 @@ export default function App() {
             sessionIdRef.current && sessionIdRef.current !== 'awaiting-backend-ws-session'
               ? sessionIdRef.current
               : undefined;
-          if (sessionStatusRef.current === 'active') {
+          if (sessionStatusRef.current === 'active' && !isTurnProcessingRef.current) {
             setVoiceState('listening');
             setStreamingPartialText('Listening for caller speech…');
           }
@@ -1137,8 +1179,8 @@ export default function App() {
               JSON.stringify({
                 type: 'audio_chunk_pcm16',
                 session_id: activeSid,
-                finalize_utterance: true,
-                vad_finalize_ms: 620,
+                discard_utterance: true,
+                finalize_utterance: false,
                 pcm_base64: '',
               }),
             );
@@ -1244,6 +1286,8 @@ export default function App() {
         }
 
         if (msg.type === 'live_timbre_audio_chunk') {
+          clearTurnProcessingState();
+          setIsReasoningThinking(false);
           if (typeof msg.ttfab_ms === 'number') {
             setLastLiveTimbreTtfabMs(msg.ttfab_ms);
           }
@@ -1264,7 +1308,11 @@ export default function App() {
                 () => {
                   setIsTtsPlaying(false);
                   isTtsPlayingRef.current = false;
-                  if (sessionStatusRef.current === 'active') {
+                  if (
+                    sessionStatusRef.current === 'active' &&
+                    !isTurnProcessingRef.current &&
+                    !vadActiveSpeechStreamingRef.current
+                  ) {
                     setVoiceState('listening');
                   }
                 },
@@ -1276,6 +1324,9 @@ export default function App() {
             } catch {
               setIsTtsPlaying(false);
               isTtsPlayingRef.current = false;
+              if (sessionStatusRef.current === 'active') {
+                setVoiceState('listening');
+              }
             }
           }
           return;
@@ -1295,6 +1346,7 @@ export default function App() {
           setLastLiveTimbreTtfabMs(timbreAudio.ttfab_ms);
         }
         if (hasPlayableTimbreAudio) {
+          clearTurnProcessingState();
           setVoiceState('speaking');
           setIsTtsPlaying(true);
           isTtsPlayingRef.current = true;
@@ -1307,7 +1359,11 @@ export default function App() {
               () => {
                 setIsTtsPlaying(false);
                 isTtsPlayingRef.current = false;
-                if (sessionStatusRef.current === 'active') {
+                if (
+                  sessionStatusRef.current === 'active' &&
+                  !isTurnProcessingRef.current &&
+                  !vadActiveSpeechStreamingRef.current
+                ) {
                   setVoiceState('listening');
                 }
               },
@@ -1324,6 +1380,7 @@ export default function App() {
         }
 
         if (msg.type === 'stt_gate_blocked') {
+          clearTurnProcessingState();
           vadFinalizeSentAtRef.current = null;
           setPcmChunksStreamed(Number(msg.pcm_chunks_ingested || 0));
           setPrismaGateMessage(`${msg.reason_code}: ${msg.message}`);
@@ -1403,6 +1460,7 @@ export default function App() {
             }
           }
           if (msg.event === 'prisma_finalized_utterance_processed') {
+            clearTurnProcessingState();
             if (vadFinalizeSentAtRef.current !== null) {
               setLastPrismaLatencyMs(
                 Math.max(1, Math.round((performance.now() - vadFinalizeSentAtRef.current) * 10) / 10),
@@ -1449,6 +1507,7 @@ export default function App() {
               setVoiceState('listening');
             }
           } else if (msg.event === 'prisma_non_speech_or_silence') {
+            clearTurnProcessingState();
             vadFinalizeSentAtRef.current = null;
             setStreamingPartialText('Silence or non-speech ignored — listening for caller speech…');
             if (sessionStatusRef.current === 'active') {
@@ -1461,6 +1520,7 @@ export default function App() {
               setStreamingPartialText('Reconnected to active session with saved incident context.');
             }
           } else if (msg.event === 'location_confirmed') {
+            clearTurnProcessingState();
             setShowLocationChangePicker(false);
             appendAudit(
               'location_confirmed_backend',
@@ -1469,7 +1529,11 @@ export default function App() {
               null,
               'loc:confirmed',
             );
-          } else if (msg.event === 'live_gemini_utterance_processed' && msg.snapshot) {
+          } else if (
+            (msg.event === 'live_gemini_utterance_processed' || msg.event === 'utterance_processed') &&
+            msg.snapshot
+          ) {
+            clearTurnProcessingState();
             syncIncidentStateFromSnapshot(msg.snapshot as Record<string, unknown>);
             if (!hasPlayableTimbreAudio && !alreadyStreamed && sessionStatusRef.current === 'active') {
               setVoiceState('listening');
@@ -1486,6 +1550,7 @@ export default function App() {
               );
             }
           } else if (msg.event === 'session_completed') {
+            clearTurnProcessingState();
             updateSessionStatus('completed');
             const endedSid = msg.session_id ? String(msg.session_id) : '';
             if (!endedSid || sessionIdRef.current === endedSid) {
@@ -1497,6 +1562,7 @@ export default function App() {
             setStreamingPartialText('Session ended. Demo resources released and conversational memory cleared.');
           }
         } else if (msg.type === 'error') {
+          clearTurnProcessingState();
           vadFinalizeSentAtRef.current = null;
           setIsReasoningThinking(false);
           setVoiceState((prev) => (prev === 'transcribing' || prev === 'understanding' ? 'listening' : prev));
@@ -2128,7 +2194,11 @@ export default function App() {
       () => {
         setIsTtsPlaying(false);
         isTtsPlayingRef.current = false;
-        if (sessionStatusRef.current === 'active') {
+        if (
+          sessionStatusRef.current === 'active' &&
+          !isTurnProcessingRef.current &&
+          !vadActiveSpeechStreamingRef.current
+        ) {
           setVoiceState(captureStarted ? 'listening' : 'microphone_denied');
           if (captureStarted) {
             setStreamingPartialText('Listening for caller speech…');
@@ -2148,6 +2218,7 @@ export default function App() {
 
   const handleEndSession = () => {
     const endingSid = sessionIdRef.current;
+    clearTurnProcessingState();
     vadActiveSpeechStreamingRef.current = false;
     sileroVadRef.current?.reset();
     audioControllerRef.current?.stopPlaybackImmediately();

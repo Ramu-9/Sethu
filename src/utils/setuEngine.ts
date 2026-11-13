@@ -500,6 +500,12 @@ export class ContinuousAudioRingBuffer {
     return out;
   }
 
+  public clear(): void {
+    this.buffer.fill(0);
+    this.writeIndex = 0;
+    this.totalSamplesWritten = 0;
+  }
+
   public get memoryBytes(): number {
     return this.buffer.byteLength;
   }

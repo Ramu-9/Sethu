@@ -1169,26 +1169,45 @@ class TestDemoFleetMemoryAndSpokenDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gas_cylinder", snap["identified_hazards"])
         self.assertIn("vehicle_collision", snap["identified_hazards"])
         self.assertIn("injuries", snap["identified_hazards"])
+        # Under Requirement 7 policy: Fire engine + Ambulance required; Police only when an explicit condition requires it
         self.assertEqual(
             set(snap["required_resource_categories"]),
-            {"fire_engine", "ambulance", "police_patrol"},
+            {"fire_engine", "ambulance"},
         )
         self.assertEqual(snap["active_safety_guidance"]["instruction_id"], "safety_fire_gas_cylinder_01")
-        # Mandatory Location Confirmation Gate must hold ALL 3 units at PENDING_LOCATION
-        self.assertTrue(len(snap["assignments"]) == 3)
+        # Mandatory Location Confirmation Gate must hold both units at PENDING_LOCATION
+        self.assertEqual(len(snap["assignments"]), 2)
         self.assertTrue(all(a["status"] == "pending_location" for a in snap["assignments"]))
         self.assertTrue(all(a["vehicle_code"] is None for a in snap["assignments"]))
 
-        # Now confirm location -> all 3 categories allocate deterministically without duplicates
+        # Now confirm location -> Fire engine + Ambulance allocate deterministically without duplicates
         conf = await bridge.handle_ws_message({"type": "location_confirm", "session_id": sid})
         conf_snap = conf["snapshot"]
         codes = {a["vehicle_code"] for a in conf_snap["assignments"]}
-        self.assertEqual(codes, {"FIR-01", "AMB-01", "POL-01"})
+        self.assertEqual(codes, {"FIR-01", "AMB-01"})
         self.assertTrue(all(a["lifecycle_status"] == "EN_ROUTE" for a in conf_snap["assignments"]))
 
         # Second confirmation / follow-up must NOT duplicate allocations
         conf2 = await bridge.handle_ws_message({"type": "location_confirm", "session_id": sid})
-        self.assertEqual(len(conf2["snapshot"]["assignments"]), 3)
+        self.assertEqual(len(conf2["snapshot"]["assignments"]), 2)
+
+        # If an explicit police condition (e.g. explosion or violence/need police) is reported, POL-01 is added additively
+        res_pol = await bridge.handle_ws_message({
+            "type": "scripted_finalized_utterance",
+            "session_id": sid,
+            "utterance_id": str(uuid4()),
+            "text": "One of the cylinders just caused a blast and we need police for crowd control!",
+            "language": "en",
+            "category": "explosion",
+            "confidence": 0.96,
+            "extracted_facts": [
+                {"field": "explosion_reported", "value": True, "evidence_text": "caused a blast"},
+            ],
+            "selected_instruction_id": "safety_fire_gas_cylinder_01",
+            "response_text": "Move further back immediately.",
+        })
+        codes_after_pol = {a["vehicle_code"] for a in res_pol["snapshot"]["assignments"]}
+        self.assertEqual(codes_after_pol, {"FIR-01", "AMB-01", "POL-01"})
 
     async def test_parallel_branch_fault_isolation_preserves_critical_turn_state(self) -> None:
         bridge = LiveSessionBridge(use_live_providers=False)

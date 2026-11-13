@@ -65,6 +65,7 @@ export class SetuWebAudioController {
   }> = [];
   private activeSourceType: 'cached_instruction' | 'live_timbre' = 'cached_instruction';
   private isPlayingState = false;
+  private playbackGeneration = 0;
   private onPlaybackStateChange?: (isPlaying: boolean, sourceType: 'cached_instruction' | 'live_timbre') => void;
 
   // Microphone & AudioWorklet state
@@ -118,6 +119,7 @@ export class SetuWebAudioController {
     playbackStartLatencyMs: number;
   }> {
     const t0 = performance.now();
+    const startGen = this.playbackGeneration;
     const response = await fetch(assetUrl);
     if (!response.ok) {
       throw new Error(`Failed to fetch instruction audio from ${assetUrl} (HTTP ${response.status})`);
@@ -133,8 +135,23 @@ export class SetuWebAudioController {
       );
     }
 
+    if (this.playbackGeneration !== startGen) {
+      return {
+        verified: true,
+        computedSha256,
+        playbackStartLatencyMs: Number((performance.now() - t0).toFixed(2)),
+      };
+    }
+
     const ctx = this.ensureAudioContext();
     const audioBuffer = await ctx.decodeAudioData(rawBytes.slice(0));
+    if (this.playbackGeneration !== startGen) {
+      return {
+        verified: true,
+        computedSha256,
+        playbackStartLatencyMs: Number((performance.now() - t0).toFixed(2)),
+      };
+    }
     this.enqueueAndPlayBuffer(audioBuffer, 'cached_instruction', onEnded);
 
     return {
@@ -172,7 +189,9 @@ export class SetuWebAudioController {
     onEnded?: () => void,
   ): void {
     const ctx = this.ensureAudioContext();
-    const startAt = Math.max(ctx.currentTime + 0.015, this.nextScheduledTime);
+    const gen = this.playbackGeneration;
+    const nowTime = ctx.currentTime;
+    const startAt = Math.max(nowTime + 0.015, this.nextScheduledTime);
     this.nextScheduledTime = startAt + buffer.duration;
 
     const source = ctx.createBufferSource();
@@ -187,7 +206,10 @@ export class SetuWebAudioController {
       this.onPlaybackStateChange?.(true, sourceType);
     }
 
-    source.onended = () => {
+    let settled = false;
+    const finishNode = () => {
+      if (settled || this.playbackGeneration !== gen) return;
+      settled = true;
       this.scheduledNodes.delete(source);
       if (this.activeSourceNode === source) {
         this.activeSourceNode = null;
@@ -200,7 +222,11 @@ export class SetuWebAudioController {
       }
     };
 
+    source.onended = finishNode;
     source.start(startAt);
+
+    const expectedTotalMs = Math.max(250, Math.ceil((this.nextScheduledTime - nowTime) * 1000) + 450);
+    window.setTimeout(finishNode, expectedTotalMs);
   }
 
   public playLiveTimbreBase64Pcm16(
@@ -237,6 +263,7 @@ export class SetuWebAudioController {
     onEnded?: () => void,
   ): void {
     const ctx = this.ensureAudioContext();
+    const gen = this.playbackGeneration;
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(ctx.destination);
@@ -246,7 +273,10 @@ export class SetuWebAudioController {
     this.isPlayingState = true;
     this.onPlaybackStateChange?.(true, sourceType);
 
-    source.onended = () => {
+    let settled = false;
+    const finishSingle = () => {
+      if (settled || this.playbackGeneration !== gen) return;
+      settled = true;
       if (this.activeSourceNode === source) {
         this.activeSourceNode = null;
         const next = this.queuedBuffers.shift();
@@ -260,7 +290,10 @@ export class SetuWebAudioController {
       }
     };
 
+    source.onended = finishSingle;
     source.start(0);
+    const expectedMs = Math.max(300, Math.ceil(buffer.duration * 1000) + 450);
+    window.setTimeout(finishSingle, expectedMs);
   }
 
   /**
@@ -271,6 +304,7 @@ export class SetuWebAudioController {
    */
   public stopPlaybackImmediately(): BargeInStopResult {
     const t0 = performance.now();
+    this.playbackGeneration += 1;
     const wasPlayingCached = this.activeSourceType === 'cached_instruction';
     let clearedScheduledExtra = Math.max(0, this.scheduledNodes.size - 1);
 

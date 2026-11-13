@@ -63,7 +63,7 @@ from backend.app.orchestrator.dispatch import (
 )
 from backend.app.orchestrator.duplicates import DuplicateDetector
 from backend.app.orchestrator.handoff import HandoffGenerator
-from backend.app.orchestrator.hospital import HospitalRanker
+from backend.app.orchestrator.hospital import HospitalRanker, HospitalScoringWeights
 from backend.app.orchestrator.instructions import InstructionLibrary
 from backend.app.orchestrator.location import GPSPermissionStatus, LocationResolver
 from backend.app.orchestrator.policy import PolicyValidator
@@ -76,6 +76,8 @@ def build_default_orchestrator(
     *,
     timbre_gate_0_2_verified: bool = False,
     demo_mode: bool = True,
+    hospital_weights: HospitalScoringWeights | None = None,
+    session_token_secret: str | None = None,
 ) -> tuple[
     SessionOrchestrator,
     HandoffGenerator,
@@ -88,7 +90,7 @@ def build_default_orchestrator(
     repo = InMemoryResourceRepository(synthetic_resources)
     dispatch = DispatchEngine(repo, demo_mode=demo_mode)
     location_resolver = LocationResolver()
-    hospital_ranker = HospitalRanker()
+    hospital_ranker = HospitalRanker(weights=hospital_weights)
     instruction_lib = InstructionLibrary(
         default_voice_by_lang=(
             {"en": "Pranav", "te": "Pranav", "hi": "Pranav"}
@@ -102,7 +104,12 @@ def build_default_orchestrator(
     duplicates = DuplicateDetector()
     audit = InMemoryAuditWriter()
     metrics = MetricsRegistry()
-    secret = os.environ.get("SETU_SESSION_SIGNING_KEY", "setu-dev-signing-secret-key-2026-india")
+    secret = (
+        session_token_secret
+        or os.environ.get("SETU_SESSION_TOKEN_SECRET")
+        or os.environ.get("SETU_SESSION_SIGNING_KEY")
+        or "setu-dev-signing-secret-key-2026-india"
+    )
     signer = SessionTokenSigner(secret_key=secret)
     orchestrator = SessionOrchestrator(
         reasoning_adapter=MockReasoningAdapter(),
@@ -325,6 +332,31 @@ def serialize_session_snapshot(
         "conversational_memory": {
             "turn_count": len(state.conversation_history),
             "cleared": state.conversational_memory_cleared,
+            "question_history": [
+                {
+                    "question_id": q.question_id,
+                    "question_text": q.question_text,
+                    "target_field": q.target_field,
+                    "status": q.status,
+                    "asked_at": q.asked_at.isoformat(),
+                    "answered_by_utterance_id": (
+                        str(q.answered_by_utterance_id) if q.answered_by_utterance_id else None
+                    ),
+                }
+                for q in getattr(state, "question_history", [])
+            ],
+            "superseded_facts": [
+                {
+                    "field_name": sf.field_name,
+                    "prior_value": sf.prior_value,
+                    "prior_utterance_id": str(sf.prior_utterance_id),
+                    "new_value": sf.new_value,
+                    "new_utterance_id": str(sf.new_utterance_id),
+                    "description": sf.description,
+                }
+                for sf in getattr(state, "superseded_facts", [])
+            ],
+            "location_history": list(getattr(state, "location_history", []) or []),
         },
         "hospital_recommendations": [
             {
@@ -401,7 +433,11 @@ class LiveSessionBridge:
             self.audit,
             self.metrics,
             self.instruction_lib,
-        ) = build_default_orchestrator(timbre_gate_0_2_verified=self.gate_0_2_timbre_verified)
+        ) = build_default_orchestrator(
+            timbre_gate_0_2_verified=self.gate_0_2_timbre_verified,
+            hospital_weights=self.settings.hospital_weights if use_live_providers else None,
+            session_token_secret=self.settings.session_token_secret if use_live_providers else None,
+        )
         self.capability_profile = DEFAULT_DEPLOYMENT_CAPABILITY_PROFILE
         self.timeout_coordinator = CallerTimeoutCoordinator(self.settings.timeout_policy)
         self.prisma_adapter = GnaniPrismaAdapter(
@@ -420,6 +456,7 @@ class LiveSessionBridge:
             build_gemini_rest_transport(
                 api_key=self.settings.gemini_api_key,
                 model_id=self.settings.gemini_model_id,
+                fallback_api_keys=self.settings.gemini_fallback_api_keys,
             )
             if (use_live_providers and self.settings.gemini_api_key)
             else None
@@ -482,6 +519,7 @@ class LiveSessionBridge:
                 utterance_id=utterance_id,
                 text=text,
                 detected_language=detected_language,
+                timeout_seconds=6.5,
             )
             self._refresh_gemini_runtime_status(state.incident_id)
             return state
@@ -984,6 +1022,7 @@ class LiveSessionBridge:
                 pcm_bytes = base64.b64decode(pcm_b64) if pcm_b64 else b""
                 seq_num = int(payload.get("sequence_number", 0))
                 is_finalize = bool(payload.get("finalize_utterance"))
+                is_discard = bool(payload.get("discard_utterance"))
 
                 if pcm_bytes:
                     self._pcm_chunks_received[sid_str] = self._pcm_chunks_received.get(sid_str, 0) + 1
@@ -1010,6 +1049,25 @@ class LiveSessionBridge:
                         }
                 try:
                     stream = self._active_stt_streams.get(sid_str)
+                    if is_discard:
+                        self._active_stt_streams.pop(sid_str, None)
+                        if stream is not None:
+                            try:
+                                await stream.close(timeout_seconds=0.5)
+                            except Exception:
+                                pass
+                        return {
+                            "type": "session_state",
+                            "req_id": req_id,
+                            "event": "prisma_non_speech_or_silence",
+                            "snapshot": serialize_session_snapshot(
+                                state.session_id,
+                                self.orchestrator,
+                                self.handoff_gen,
+                                self.audit,
+                            ),
+                            "prisma_transcript": None,
+                        }
                     if is_finalize and not pcm_bytes and (
                         stream is None
                         or not getattr(stream, "is_active", False)
@@ -1066,6 +1124,28 @@ class LiveSessionBridge:
                         self.metrics.record_latency("prisma_final_transcript_ms", prisma_stt_ms)
                         await stream.close(timeout_seconds=1.0)
                         if evt.signal_type == STTSignalType.FINAL_TRANSCRIPT and evt.text:
+                            # Guard against speakerphone acoustic self-echo of the assistant's own spoken output
+                            raw_words = [
+                                w.strip(".,!?;:\"'()")
+                                for w in evt.text.lower().split()
+                                if w.strip(".,!?;:\"'()")
+                            ]
+                            assistant_ref = (state.last_spoken_response_text or "").lower()
+                            if len(raw_words) >= 4 and assistant_ref:
+                                matched_words = sum(1 for w in raw_words if w in assistant_ref)
+                                if (matched_words / len(raw_words)) >= 0.80:
+                                    return {
+                                        "type": "session_state",
+                                        "req_id": req_id,
+                                        "event": "prisma_non_speech_or_silence",
+                                        "snapshot": serialize_session_snapshot(
+                                            state.session_id,
+                                            self.orchestrator,
+                                            self.handoff_gen,
+                                            self.audit,
+                                        ),
+                                        "prisma_transcript": None,
+                                    }
                             turn_id = str(evt.utterance_id)
                             if emit_event is not None:
                                 emit_event(
@@ -1309,9 +1389,13 @@ class LiveSessionBridge:
             if msg_type == "barge_in":
                 session_id = self._resolve_session_id(payload)
                 barge_mode = str(payload.get("barge_in_mode", "genuine_speech"))
+                preserve_stream = bool(payload.get("preserve_active_stream", False))
                 state = self.orchestrator.get_session(session_id)
-                if barge_mode not in {"empty_pre_gate01", "verified_false_trigger"}:
-                    # Drop any stale un-finalized non-speech stream so the interrupting utterance starts cleanly
+                if (
+                    not preserve_stream
+                    and barge_mode not in {"empty_pre_gate01", "verified_false_trigger"}
+                ):
+                    # Drop any stale un-finalized non-speech stream when explicitly requested
                     self._active_stt_streams.pop(str(session_id), None)
                 self.orchestrator.handle_barge_in(
                     session_id,
@@ -1861,12 +1945,20 @@ async def run_stdio_ws_bridge() -> None:
         _write_stdout_line(event)
 
     async def _handle_line(raw_line: str) -> None:
+        req_id: Any = None
         try:
             payload = json.loads(raw_line)
+            if isinstance(payload, dict):
+                req_id = payload.get("req_id")
             response = await bridge.handle_ws_message(payload, emit_event=_emit_stream_event)
-        except Exception as exc:
+            if isinstance(response, dict) and req_id is not None and "req_id" not in response:
+                response["req_id"] = req_id
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             response = {
                 "type": "error",
+                "req_id": req_id,
                 "reason_code": "bridge_parse_error",
                 "message": str(exc),
             }

@@ -1,4 +1,5 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 import express from 'express';
 import http from 'http';
 import crypto from 'crypto';
@@ -173,7 +174,24 @@ async function startServer() {
     return new Promise((resolve) => {
       const reqId = `ws-req-${++reqCounter}-${Date.now()}`;
       const enriched = { ...messageObj, req_id: reqId };
-      pendingCallbacks.set(reqId, resolve);
+      const timeoutHandle = setTimeout(() => {
+        if (pendingCallbacks.has(reqId)) {
+          pendingCallbacks.delete(reqId);
+          streamCallbacks.delete(reqId);
+          resolve(
+            JSON.stringify({
+              type: 'error',
+              req_id: reqId,
+              reason_code: 'bridge_request_timeout',
+              message: 'Python session bridge timed out processing request.',
+            }),
+          );
+        }
+      }, 16000);
+      pendingCallbacks.set(reqId, (responseJson: string) => {
+        clearTimeout(timeoutHandle);
+        resolve(responseJson);
+      });
       if (onStreamChunk) {
         streamCallbacks.set(reqId, onStreamChunk);
       }
@@ -235,20 +253,41 @@ async function startServer() {
     }),
   );
 
-  // Serve ONNX Runtime WebAssembly binaries and .mjs glue directly so Vite dev middleware does not 404 on `?import`
-  app.use(
-    '/onnx-wasm',
-    express.static(path.resolve(process.cwd(), 'public/onnx-wasm'), {
-      setHeaders: (res, filePath) => {
-        if (filePath.endsWith('.mjs') || filePath.endsWith('.js')) {
-          res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
-        } else if (filePath.endsWith('.wasm')) {
-          res.setHeader('Content-Type', 'application/wasm');
+  // Ensure ONNX Runtime WebAssembly binaries (.wasm) and glue (.mjs) exist in public/onnx-wasm
+  const publicOnnxDir = path.resolve(process.cwd(), 'public/onnx-wasm');
+  const nodeModulesOnnxDir = path.resolve(process.cwd(), 'node_modules/onnxruntime-web/dist');
+  try {
+    if (fs.existsSync(nodeModulesOnnxDir)) {
+      fs.mkdirSync(publicOnnxDir, { recursive: true });
+      for (const entry of fs.readdirSync(nodeModulesOnnxDir)) {
+        if (entry.startsWith('ort-wasm') && (entry.endsWith('.wasm') || entry.endsWith('.mjs'))) {
+          const srcFile = path.join(nodeModulesOnnxDir, entry);
+          const destFile = path.join(publicOnnxDir, entry);
+          if (!fs.existsSync(destFile)) {
+            fs.copyFileSync(srcFile, destFile);
+          }
         }
-        res.setHeader('Cache-Control', 'no-cache');
-      },
-    }),
-  );
+      }
+    }
+  } catch (err) {
+    console.warn('Notice: failed to sync onnx-wasm assets:', err);
+  }
+
+  const setOnnxHeaders = (res: express.Response, filePath: string) => {
+    if (filePath.endsWith('.mjs') || filePath.endsWith('.js')) {
+      res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+    } else if (filePath.endsWith('.wasm')) {
+      res.setHeader('Content-Type', 'application/wasm');
+    }
+    res.setHeader('Cache-Control', 'no-cache');
+  };
+
+  // Serve ONNX Runtime WebAssembly binaries and .mjs glue directly so Vite dev middleware does not 404 on `?import` or fall through to index.html
+  app.use('/onnx-wasm', express.static(publicOnnxDir, { setHeaders: setOnnxHeaders }));
+  app.use('/onnx-wasm', express.static(nodeModulesOnnxDir, { setHeaders: setOnnxHeaders }));
+  app.use('/onnx-wasm', (_req, res) => {
+    res.status(404).end();
+  });
 
   const server = http.createServer(app);
 
@@ -352,9 +391,8 @@ async function startServer() {
         } catch {
           msgType = '';
         }
-        // Control events (barge_in, location_confirm, demo_lifecycle_tick, session_end) bypass PCM chunk queue
+        // Background lifecycle/control events bypass PCM chunk queue
         if (
-          msgType === 'barge_in' ||
           msgType === 'location_confirm' ||
           msgType === 'demo_lifecycle_tick' ||
           msgType === 'session_end'

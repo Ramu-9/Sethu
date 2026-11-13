@@ -349,12 +349,13 @@ class PrismaSTTStreamSession(STTStreamSession):
                 conn_sock.sendall(_encode_client_ws_frame(b"\x00" * frame_bytes, opcode=0x02))
                 time.sleep(0.015)
 
-            read_deadline = time.monotonic() + max(3.5, min(timeout_sec, 10.0))
-            base_read_timeout = max(2.0, min(timeout_sec, 4.0))
-            post_final_grace_sec = 0.40
+            read_deadline = time.monotonic() + max(2.8, min(timeout_sec, 6.0))
+            base_read_timeout = max(1.5, min(timeout_sec, 2.2))
+            post_final_grace_sec = 0.18
             conn_sock.settimeout(base_read_timeout)
 
             segments: list[str] = []
+            last_partial_text: str = ""
             pending_utt_ids: set[str] = set()
             last_confidence: float | None = None
             speech_detected = False
@@ -363,6 +364,8 @@ class PrismaSTTStreamSession(STTStreamSession):
                 remaining = read_deadline - time.monotonic()
                 if segments and not pending_utt_ids:
                     conn_sock.settimeout(min(post_final_grace_sec, max(0.05, remaining)))
+                elif segments:
+                    conn_sock.settimeout(min(0.35, max(0.05, remaining)))
                 else:
                     conn_sock.settimeout(min(base_read_timeout, max(0.1, remaining)))
                 try:
@@ -399,6 +402,8 @@ class PrismaSTTStreamSession(STTStreamSession):
                     if evt.get("confidence") is not None:
                         last_confidence = float(evt["confidence"])
                     if txt and not is_final:
+                        speech_detected = True
+                        last_partial_text = txt
                         self.enqueue_provider_event(
                             TranscriptEvent(
                                 session_id=self._session_id,
@@ -417,8 +422,9 @@ class PrismaSTTStreamSession(STTStreamSession):
                             pending_utt_ids.discard(str(utt_ref))
                         if txt:
                             segments.append(txt)
+                            last_partial_text = ""
 
-            final_text = " ".join(segments).strip()
+            final_text = " ".join(segments).strip() or last_partial_text.strip()
             if not final_text:
                 return {
                     "signal_type": "non_speech_or_empty",

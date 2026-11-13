@@ -178,6 +178,7 @@ class DialogueContext:
     pending_question: PendingQuestionRecord | None = None
     identified_hazards: Sequence[str] = ()
     active_safety_guidance_id: str | None = None
+    session_memory_summary: Mapping[str, object] | None = None
 
     def known_utterance_ids(self) -> set[UUID]:
         """Return the set of all finalized utterance IDs in this dialogue context."""
@@ -296,6 +297,8 @@ class ReasoningOutput:
     pending_question_answered: bool | None = None
     proposed_followup_target_field: str | None = None
     identified_hazards: Sequence[str] = ()
+    thinking_level: str = "LOW"
+    was_coalesced_or_cached: bool = False
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.category_confidence <= 1.0):
