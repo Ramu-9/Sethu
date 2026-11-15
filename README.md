@@ -1,4 +1,4 @@
-# SETU.ai (सेतु) — Real-Time Multilingual Voice-First Emergency Coordination System
+# SETHU.ai — Real-Time Multilingual Voice-First Emergency Coordination System
 
 [![TypeScript](https://img.shields.io/badge/Frontend-React_19_%2B_TypeScript_5.8-3178C6?logo=typescript&logoColor=white)](#)
 [![Python](https://img.shields.io/badge/Backend_Orchestrator-Python_3.10%2B_AsyncIO-3776AB?logo=python&logoColor=white)](#)
@@ -7,13 +7,13 @@
 [![Reasoning](https://img.shields.io/badge/Reasoning-Gemini_3.8_Flash_(Adaptive_LOW%2FMEDIUM)-8E75B2)](#)
 [![Database](https://img.shields.io/badge/Database-PostgreSQL_%2B_PostGIS_%2B_pg__trgm-336791?logo=postgresql&logoColor=white)](#)
 
-> **PROTOTYPE DISCLOSURE (NOT 112):** SETU is an emergency coordination research & engineering prototype built for India's multilingual emergency intake workflows (**English**, **Telugu / Tanglish**, **Hindi / Hinglish**). It does **not** replace India's 112 emergency service and is not connected to real-world emergency dispatch. All units, availability, assignments, and ETAs are strictly simulated.
+> **PROTOTYPE DISCLOSURE (NOT 112):** SETHU.ai is an emergency coordination research & engineering prototype built for India's multilingual emergency intake workflows (**English**, **Telugu / Tanglish**, **Hindi / Hinglish**, **Romanised Benglish**). It does **not** replace India's 112 emergency service and is not connected to real-world emergency dispatch. All units, availability, assignments, and ETAs are strictly simulated.
 
 ---
 
 ## Table of Contents
 
-1. [Executive Overview — What SETU Solves](#1-executive-overview--what-setu-solves)
+1. [Executive Overview — What SETHU.ai Solves](#1-executive-overview--what-sethuai-solves)
 2. [End-to-End System Architecture](#2-end-to-end-system-architecture)
 3. [Real-Time Voice & Acoustic Pipeline Internals](#3-real-time-voice--acoustic-pipeline-internals)
 4. [Gemini 3.8 Flash Reasoning, Adaptive Thinking & Session Memory](#4-gemini-38-flash-reasoning-adaptive-thinking--session-memory)
@@ -23,10 +23,11 @@
 8. [Measured Performance, Token Optimization & Verification Suite](#8-measured-performance-token-optimization--verification-suite)
 9. [Repository Structure](#9-repository-structure)
 10. [Quickstart & Local Development](#10-quickstart--local-development)
+11. [Hackathon Award Track & Judging Matrix](#11-hackathon-award-track--judging-matrix)
 
 ---
 
-## 1. Executive Overview — What SETU Solves
+## 1. Executive Overview — What SETHU.ai Solves
 
 During high-stress emergencies in India, callers frequently speak in **code-mixed regional languages** (English, Telugu, Hindi, Tanglish, Hinglish), interrupt prompts mid-sentence (**barge-in**), report **compound simultaneous hazards** (e.g., a lorry carrying LPG gas cylinders colliding with a passenger bus, causing both a fire and multiple injuries), or revise earlier statements as the situation unfolds.
 
@@ -35,16 +36,16 @@ Traditional IVR trees and unconstrained LLM chatbots fail in this domain:
 - **Unconstrained LLMs** can hallucinate dispatch promises, drop earlier facts when context windows truncate, or stall the conversation during upstream API latency spikes.
 - **Browser `speechSynthesis` / `<audio>` tags** lack deterministic sample-accurate barge-in cancellation and cryptographic asset verification.
 
-**SETU.ai bridges conversational AI with deterministic emergency systems engineering:**
+**SETHU.ai bridges conversational AI with deterministic emergency systems engineering:**
 
-| Engineering Pillar | How SETU Implements It |
+| Engineering Pillar | How SETHU.ai Implements It |
 | :--- | :--- |
 | **Sub-2ms Acoustic Barge-In & 1.5s Pre-Roll** | Custom `16 kHz` mono `AudioWorklet` + `ContinuousAudioRingBuffer` + in-browser **Silero VAD v5 (ONNX WebAssembly)**. When the caller interrupts assistant speech, active `AudioBufferSourceNode` nodes stop in **`< 2 ms`** and the preceding **`1,500 ms`** of pre-roll audio is flushed to STT so the first syllable is never clipped. |
 | **1 Finalized Utterance = 1 Gemini Request** | Strict `(session_id, utterance_id)` in-flight `asyncio.Future` coalescing and LRU retransmission deduplication prevent duplicate LLM calls from VAD misfires, interim transcripts, or WebSocket retries—while guaranteeing that two separate `"Yes"` answers to different questions are **never** falsely treated as duplicates. |
 | **Context-Driven Adaptive Thinking (`LOW` / `MEDIUM`)** | Deterministic pre-classifier inspects clinical acuity (unconscious/non-breathing/trapped), simultaneous hazards, and fact contradictions to select `LOW` thinking for routine replies and `MEDIUM` thinking for complex multi-hazard triage—without an extra LLM call. |
 | **Lossless Session Memory + Bounded Prompting** | Retains 100% of session facts, utterance UUID provenance, answered questions, and fact corrections from Turn 1 until session end, while bounding verbatim prompt history to the last 6 turns (**46.0% prompt token reduction** on 12-turn calls). |
 | **4-Way Parallel Post-Reasoning Orchestration** | Runs fact merging, multi-hazard fleet evaluation, SHA-256 safety guidance lookup, and geodesic hospital ranking concurrently via `asyncio.gather`, then overlaps **Gnani Timbre v2.5 SSE TTS streaming** (`~340 ms` TTFB) with **PostgreSQL/PostGIS persistence**. |
-| **Zero-Stall Deterministic Resilience** | If upstream Gemini returns `HTTP 503` or exceeds the bounded live turn budget, SETU seamlessly fails over to a deterministic multilingual extractor (`en`/`te`/`hi`) and pre-verified safety library so the caller **never** experiences a stuck `"Processing"` screen. |
+| **Zero-Stall Deterministic Resilience** | If upstream Gemini returns `HTTP 503` or exceeds the bounded live turn budget, SETHU.ai seamlessly fails over to a deterministic multilingual extractor (`en`/`te`/`hi`) and pre-verified safety library so the caller **never** experiences a stuck `"Processing"` screen. |
 
 ---
 
@@ -214,7 +215,7 @@ Implemented in `GeminiReasoningAdapter` (`backend/app/adapters/reasoning.py`) an
   - Routine single-hazard descriptions, acknowledgements, direct unambiguous answers to pending questions (`"Yes"`, `"No"`, `"Two people"`, `"Near ABC School"`), and post-allocation status follow-ups.
 
 ### 4.3 Complete Session Memory with Bounded Prompt Serialization
-SETU never forgets facts from earlier in the call while keeping prompt token counts compact:
+SETHU.ai never forgets facts from earlier in the call while keeping prompt token counts compact:
 - **Complete Authoritative State (`IncidentSessionState`)**:
   - `validated_facts`: All active `ProvenancedFact` records (`field_name`, `value`, `source_utterance_id`, exact substring `evidence_text`).
   - `superseded_facts` & `conflicts`: Full audit trail of any corrected or conflicting caller statements with both `prior_utterance_id` and `new_utterance_id`.
@@ -224,7 +225,7 @@ SETU never forgets facts from earlier in the call while keeping prompt token cou
   - Serializes the complete `Structured Session Memory` JSON + `Confirmed/Answered Fields (DO NOT RE-ASK)` + `Validated Incident Facts` + a **bounded 6-turn verbatim conversation window** (`MAX_RECENT_CONVERSATION_TURNS = 6`) + a compact provenance index for turns older than 6 turns.
 
 ### 4.4 Intelligent, Personalized Next-Question Generation
-SETU does **not** follow a static questionnaire. Next questions are chosen dynamically from the caller's actual statement and missing high-priority triage fields:
+SETHU.ai does **not** follow a static questionnaire. Next questions are chosen dynamically from the caller's actual statement and missing high-priority triage fields:
 - **Scenario A (Gas-cylinder vehicle + bus collision + fire + injuries)**: Classifies as `fire_with_injuries`, extracts `injuries_reported=true` and `identified_hazards=['vehicle_collision', 'fire', 'gas_cylinder', 'injuries']`, **never re-asks whether anyone is injured**, and prioritizes asking whether the caller is at a safe distance (`caller_safe_spot_status`).
 - **Scenario B (Fire reported, caller states nobody is injured)**: Extracts `injuries_reported=false`, marks `injuries_reported` as answered, never asks about injuries again, and asks for the nearest landmark or caller safety status.
 - **Scenario C (Caller reports a person is unconscious)**: Recognizes critical clinical acuity (`MEDIUM` thinking), extracts `consciousness_status='unconscious'` and `injuries_reported=true`, and prioritizes location or breathing status.
@@ -268,13 +269,13 @@ $$\text{Final Score} = w_{\text{dist}} \cdot \max\left(0, 1 - \frac{d_{\text{km}
 
 ## 6. Control-Room Dashboard & Visual Walkthrough (No Live URL Needed)
 
-When a recruiter or engineer opens SETU.ai, the interface is organized into three operational workspaces designed for zero-ambiguity emergency coordination:
+When a recruiter or engineer opens SETHU.ai, the interface is organized into three operational workspaces designed for zero-ambiguity emergency coordination:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  PROTOTYPE DISCLOSURE BANNER: SETU is a simulation prototype (NOT connected to 112).                 │
+│  PROTOTYPE DISCLOSURE BANNER: SETHU.ai is a simulation prototype (NOT connected to 112).             │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│  HEADER: [SETU सेतु]  |  Session ID & Incident ID  |  Language: EN / TE / HI  |  [Live Incident] [Handoff] │
+│  HEADER: [SETHU.ai]  |  Session ID & Incident ID  |  Language: EN / TE / HI  |  [Live Incident] [Handoff] │
 ├───────────────────────────────────────────────┬──────────────────────────────────────────────────────┤
 │  LEFT COLUMN: LIVE VOICE & CALLER COORDINATION│  RIGHT COLUMN: GEODESIC MAP, FLEET & TRIAGE LEDGER   │
 │                                               │                                                      │
@@ -322,7 +323,7 @@ Defined in `backend/migrations/0001_initial_setu_schema.sql` and managed at runt
 
 ### 8.1 Before vs. After Gemini API & Prompt Optimization (12-Turn Emergency Session)
 
-| Metric | Legacy Unoptimized Baseline | Optimized SETU Pipeline | Measured Improvement |
+| Metric | Legacy Unoptimized Baseline | Optimized SETHU.ai Pipeline | Measured Improvement |
 | :--- | :--- | :--- | :--- |
 | **Total Prompt Tokens (12-Turn Session)** | `7,940` tokens | `4,288` tokens | **-46.0% token reduction** (`3,652` tokens saved/session) |
 | **Turn 12 Prompt Size (Long Call Scaling)** | `1,158` tokens | `519` tokens | **-55.2% reduction** on late-session turns |
@@ -411,7 +412,26 @@ The unified Express + Vite + Python `/ws/session` bridge server will start on `h
 # Run all 60 Python backend unit, orchestration, and Gemini optimization tests
 python3 -m unittest discover -s backend/tests -p "test_*.py"
 
+# Run frontend deterministic engine unit tests
+npx tsx --test src/utils/setuEngine.test.ts
+
 # Run TypeScript typechecking and production bundle verification
 npm run lint
 npm run build
 ```
+
+---
+
+## 11. Hackathon Award Track & Judging Matrix
+
+SETHU.ai is engineered from the ground up to address the core technical and real-world challenges across the hackathon's primary award tracks:
+
+| Award Track | Judging Focus | How SETHU.ai Delivers & Verifies It | Key Modules |
+| :--- | :--- | :--- | :--- |
+| **01 — Main Character Award**<br>*(Regional / Low-Resource Indian Languages)* | Best build in a regional Indian language | Native **Telugu (`te-IN`)** and **Hindi (`hi-IN`)** streaming intake via **Gnani Prisma v2.5 WSS** (`16 kHz` PCM16) paired with **Gnani Timbre v2.5 SSE** synthesis (`voice="Pranav"`) and **36 SHA-256 verified pre-synthesized regional WAV safety instructions** so callers receive immediate native-script + spoken reassurance even during upstream network degradation. | `backend/app/adapters/prisma.py`<br>`backend/app/adapters/timbre.py`<br>`backend-media/instructions/` |
+| **02 — Mixed Vibes Award**<br>*(Code-Mixed Speech)* | Best code-mixed voice experience across **Hinglish, Tanglish & Benglish** | Supports seamless mid-call code-switching across **Telugu-English (`TANGLISH`)**, **Hindi-English (`HINGLISH`)**, and **Romanised Bengali-English (`BENGLISH`)** with per-utterance language badges, multilingual hazard/acuity regex pre-classification (`spruha ledu`, `behosh`, `agun legeche`, `oshustho`, `manta`, `pramadam`), and `pg_trgm` romanised landmark matching. | `backend/app/adapters/reasoning.py`<br>`src/App.tsx`<br>`backend/app/orchestrator/location.py` |
+| **03 — Real Deal Award**<br>*(Real-World Impact)* | Most useful real-world problem solved for citizens & frontline workers | Solves India's high-stress emergency intake bottleneck where callers panic, speak in code-mixed dialects, report landmarks instead of street addresses, or call from coarse cellular towers (`> 500 m`). Enforces **utterance-UUID provenance**, **contradiction detection**, **location confirmation gates**, and a **10-section printable Incident Handoff** for rural/urban emergency responders. | `backend/app/orchestrator/session.py`<br>`backend/app/orchestrator/handoff.py`<br>`src/components/SetuMapLibre.tsx` |
+| **04 — Noise Canceller Award**<br>*(Noisy, Real Telephonic Audio)* | Best performance on messy, noisy, real telephonic audio | 1. **Continuous 16 kHz Ring Buffer (`1,500 ms` pre-roll)** prevents clipped initial syllables.<br>2. **In-Browser Silero VAD v5 (ONNX WASM)** filters street/siren noise misfires locally (`0` wasted LLM calls) with a 3-strike false-barge-in guard.<br>3. **Client DSP Acoustic Environment Intelligence** computes real-time ambient noise floor (`dBFS`), overlapping voices, clipping (`\|sample\| >= 32112`), and speech ratio in $O(N)$ per frame.<br>4. **Isolated 8 kHz Telephony & Street Noise Bench** in Engineering Diagnostics. | `src/utils/audioPipeline.ts`<br>`src/utils/sileroVadRunner.ts`<br>`src/App.tsx` |
+| **06 — Solo Ninja Award**<br>*(Single Participant Build)* | Best complete full-stack project built by a solo engineer | Full-stack real-time voice & spatial coordination platform combining Web Audio `AudioWorklet` DSP, Silero VAD ONNX, RFC 6455 WebSocket multiplexing, Python `asyncio` 4-way parallel orchestration, PostGIS geodesic dispatch, MapLibre GL visualization, and 65 automated unit/integration tests (`60` Python + `5` TypeScript). | Full Repository |
+| **07 — Jugaad Genius Award**<br>*(Creative Use of Gnani AI Models)* | Most creative or high-leverage engineering of Gnani AI's voice stack | **Hybrid Dual-Path Gnani Voice Architecture**: Combines **Gnani Prisma v2.5** streaming STT with a dual-tier **Gnani Timbre v2.5** output engine — pairing `< 20 ms` SHA-256 verified cached Timbre WAV safety instructions for zero-wait emergency reassurance with live SSE streaming Timbre synthesis (`~340 ms` TTFB) overlapped concurrently with PostGIS persistence via `asyncio.gather`, plus `< 2 ms` synchronous `AudioBufferSourceNode` barge-in. | `src/utils/audioPipeline.ts`<br>`backend/app/main.py`<br>`backend/app/orchestrator/instructions.py` |
+

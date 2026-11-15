@@ -38,6 +38,10 @@ TIMBRE_LANGUAGE_CODE_MAP: dict[SupportedLanguage, str] = {
     "en": "en-IN",
     "te": "te-IN",
     "hi": "hi-IN",
+    "kn": "kn-IN",
+    "ta": "ta-IN",
+    "ml": "ml-IN",
+    "bn": "bn-IN",
 }
 
 SUPPORTED_TIMBRE_V25_VOICES = frozenset(
@@ -94,6 +98,10 @@ DEFAULT_TIMBRE_V25_VOICE_BY_LANGUAGE: dict[SupportedLanguage, str] = {
     "en": "Pranav",
     "hi": "Pranav",
     "te": "Pranav",
+    "kn": "Pranav",
+    "ta": "Pranav",
+    "ml": "Pranav",
+    "bn": "Pranav",
 }
 
 

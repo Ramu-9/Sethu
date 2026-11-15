@@ -51,6 +51,9 @@ class StructuredIncidentHandoff:
     event_timeline: tuple[dict[str, object], ...]
     session_completion_status: str
     active_language: str = "en"
+    initial_language: str = "en"
+    language_mode: str = "manual"
+    detected_languages_seen: tuple[str, ...] = ()
     safety_guidance_attribution: dict[str, object] | None = None
     location_confirmed_at: datetime | None = None
     broad_location_text: str | None = None
@@ -245,6 +248,12 @@ class HandoffGenerator:
             event_timeline=timeline,
             session_completion_status=state.session_state,
             active_language=state.active_language,
+            initial_language=state.initial_language,
+            language_mode=getattr(state, "language_mode", "manual"),
+            detected_languages_seen=tuple(
+                getattr(state, "detected_languages_seen", [state.initial_language])
+                or [state.initial_language]
+            ),
             safety_guidance_attribution=safety_attr,
             location_confirmed_at=(
                 state.location_state.confirmed_at if state.location_state else None

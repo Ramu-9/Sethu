@@ -137,24 +137,15 @@ def generate_manifest_json(output_dir: Path, *, force_resynthesize: bool = False
             wav_rel = Path(
                 f"backend-media/instructions/{inst.language}/{inst.instruction_id}/{inst.version}.wav"
             )
-            existing_row = existing_map.get((inst.instruction_id, inst.language))
-            if (
-                not force_resynthesize
-                and existing_row is not None
-                and existing_row.get("generation_status") == "ready"
-                and existing_row.get("approved_text") == inst.approved_text
-                and wav_rel.exists()
-                and wav_rel.stat().st_size > 16000
-            ):
+            if not force_resynthesize and wav_rel.exists() and wav_rel.stat().st_size > 16000:
                 actual_sha = hashlib.sha256(wav_rel.read_bytes()).hexdigest()
-                if actual_sha == existing_row.get("checksum_sha256"):
-                    return f"{inst.instruction_id}:{inst.language}", actual_sha, True
+                return f"{inst.instruction_id}:{inst.language}", actual_sha, True
 
             last_err: Exception | None = None
-            for attempt in range(5):
+            for attempt in range(6):
                 try:
                     if attempt > 0:
-                        time.sleep(1.5 * attempt)
+                        time.sleep(2.5 * attempt)
                     pcm_bytes = adapter.synthesize_pcm_sync(
                         text=inst.approved_text,
                         language=inst.language,
@@ -162,11 +153,11 @@ def generate_manifest_json(output_dir: Path, *, force_resynthesize: bool = False
                         timeout_seconds=25.0,
                     )
                     digest = _write_pcm_as_wav_16khz_mono(wav_rel, pcm_bytes)
-                    time.sleep(0.35)
+                    time.sleep(0.6)
                     return f"{inst.instruction_id}:{inst.language}", digest, True
                 except Exception as exc:
                     last_err = exc
-                    time.sleep(1.2 * (attempt + 1))
+                    time.sleep(2.0 * (attempt + 1))
             raise RuntimeError(
                 f"Timbre synthesis failed for {inst.instruction_id}:{inst.language}: {last_err}"
             )
@@ -181,7 +172,15 @@ def generate_manifest_json(output_dir: Path, *, force_resynthesize: bool = False
 
         if all_succeeded:
             lib = InstructionLibrary(
-                default_voice_by_lang={"en": "Pranav", "te": "Pranav", "hi": "Pranav"},
+                default_voice_by_lang={
+                    "en": "Pranav",
+                    "te": "Pranav",
+                    "hi": "Pranav",
+                    "kn": "Pranav",
+                    "ta": "Pranav",
+                    "ml": "Pranav",
+                    "bn": "Pranav",
+                },
                 timbre_version="v2.5",
                 timbre_gate_0_2_verified=True,
             )
@@ -190,6 +189,12 @@ def generate_manifest_json(output_dir: Path, *, force_resynthesize: bool = False
             for inst in lib._instructions:
                 resolved_inst, entry = lib.resolve_cached_asset(inst.instruction_id, inst.language)
                 if entry is not None:
+                    existing_row = existing_map.get((entry.instruction_id, entry.language))
+                    preserved_generated_at = (
+                        str(existing_row.get("generated_at"))
+                        if existing_row and existing_row.get("generated_at")
+                        else now_iso
+                    )
                     manifest_rows.append(
                         {
                             "instruction_id": entry.instruction_id,
@@ -200,7 +205,7 @@ def generate_manifest_json(output_dir: Path, *, force_resynthesize: bool = False
                             "audio_format": entry.audio_format,
                             "file_path": entry.file_path,
                             "checksum_sha256": entry.checksum_sha256,
-                            "generated_at": now_iso,
+                            "generated_at": preserved_generated_at,
                             "generation_status": "ready",
                             "placeholder_notice": (
                                 "Synthesized by Gnani Timbre v2.5 (voice=Pranav, 16 kHz 16-bit mono PCM WAV) "

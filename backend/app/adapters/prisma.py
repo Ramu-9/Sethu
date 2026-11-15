@@ -47,6 +47,10 @@ LANGUAGE_CODE_MAP: dict[SupportedLanguage, str] = {
     "en": "en-IN",
     "te": "te-IN",
     "hi": "hi-IN",
+    "kn": "kn-IN",
+    "ta": "ta-IN",
+    "ml": "ml-IN",
+    "bn": "bn-IN",
 }
 
 REVERSE_LANGUAGE_MAP: dict[str, SupportedLanguage] = {
@@ -56,6 +60,14 @@ REVERSE_LANGUAGE_MAP: dict[str, SupportedLanguage] = {
     "te-in": "te",
     "hi": "hi",
     "hi-in": "hi",
+    "kn": "kn",
+    "kn-in": "kn",
+    "ta": "ta",
+    "ta-in": "ta",
+    "ml": "ml",
+    "ml-in": "ml",
+    "bn": "bn",
+    "bn-in": "bn",
 }
 
 
@@ -137,6 +149,7 @@ class PrismaSTTStreamSession(STTStreamSession):
             Callable[[list[AudioChunk], SupportedLanguage, float], Coroutine[Any, Any, dict[str, Any]]]
             | None
         ) = None,
+        auto_detect_language: bool = False,
     ) -> None:
         self._session_id = session_id
         self._utterance_id = utterance_id
@@ -144,6 +157,7 @@ class PrismaSTTStreamSession(STTStreamSession):
         self._endpoint_url = endpoint_url
         self._api_key = api_key
         self._finalize_transport = finalize_transport
+        self._auto_detect_language = bool(auto_detect_language)
         self._is_active = True
         self._chunks: list[AudioChunk] = []
         self._event_queue: asyncio.Queue[TranscriptEvent] = asyncio.Queue()
@@ -159,6 +173,10 @@ class PrismaSTTStreamSession(STTStreamSession):
     @property
     def buffered_chunk_count(self) -> int:
         return len(self._chunks)
+
+    @property
+    def auto_detect_language(self) -> bool:
+        return self._auto_detect_language
 
     async def send_audio_chunk(
         self,
@@ -251,12 +269,17 @@ class PrismaSTTStreamSession(STTStreamSession):
                 provider_timestamp=datetime.now(timezone.utc),
             )
 
-        det_lang_raw = str(
-            raw.get("detected_language")
-            or raw.get("detected_language_code")
-            or self._language_hint
-        ).lower()
-        det_lang: SupportedLanguage = REVERSE_LANGUAGE_MAP.get(det_lang_raw, self._language_hint)
+        explicit_raw_code = str(
+            raw.get("detected_language_code")
+            or raw.get("detected_language")
+            or ""
+        ).strip()
+        det_lang_raw = (explicit_raw_code or self._language_hint).lower()
+        if self._auto_detect_language and explicit_raw_code:
+            # In auto-detect mode, do not silently coerce out-of-scope languages (e.g. mr-IN, gu-IN)
+            det_lang: SupportedLanguage | None = REVERSE_LANGUAGE_MAP.get(det_lang_raw, None)
+        else:
+            det_lang = REVERSE_LANGUAGE_MAP.get(det_lang_raw, self._language_hint)
         conf_val = raw.get("transcript_confidence") or raw.get("confidence")
         lang_conf_val = raw.get("language_confidence")
         final_evt = TranscriptEvent(
@@ -268,26 +291,34 @@ class PrismaSTTStreamSession(STTStreamSession):
             language_confidence=float(lang_conf_val) if lang_conf_val is not None else 0.92,
             transcript_confidence=float(conf_val) if conf_val is not None else 0.92,
             provider_timestamp=datetime.now(timezone.utc),
+            raw_detected_language_code=explicit_raw_code or LANGUAGE_CODE_MAP.get(self._language_hint, "en-IN"),
         )
         self.enqueue_provider_event(final_evt)
         return final_evt
 
     def _sync_wss_stream_finalize(self, timeout_sec: float) -> dict[str, Any]:
         """
-        Execute a live WebSocket streaming session against Gnani Prisma v2.5
+        Execute a live WebSocket streaming session against Gnani Prisma
         (wss://api.vachana.ai/stt/v3/stream) with X-API-Key-ID authentication.
+        Uses model='prisma-v2.5' with explicit language_code for manual language selection,
+        and model='prisma-v3.0' with language_code='indic-auto' when auto_detect_language=True.
         """
         parsed = urllib.parse.urlsplit(self._endpoint_url)
         use_tls = parsed.scheme.lower() == "wss"
         host = parsed.hostname or "api.vachana.ai"
         port = parsed.port or (443 if use_tls else 80)
         base_path = parsed.path or "/stt/v3/stream"
-        lang_code = LANGUAGE_CODE_MAP[self._language_hint]
+        lang_code = (
+            "indic-auto"
+            if self._auto_detect_language
+            else LANGUAGE_CODE_MAP.get(self._language_hint, "en-IN")
+        )
+        model_name = "prisma-v3.0" if self._auto_detect_language else "prisma-v2.5"
 
         query_params = urllib.parse.urlencode(
             {
                 "language_code": lang_code,
-                "model": "prisma-v2.5",
+                "model": model_name,
                 "sample_rate": "16000",
             }
         )
@@ -313,7 +344,7 @@ class PrismaSTTStreamSession(STTStreamSession):
                 f"Sec-WebSocket-Version: 13\r\n"
                 f"X-API-Key-ID: {self._api_key}\r\n"
                 f"language_code: {lang_code}\r\n"
-                f"model: prisma-v2.5\r\n"
+                f"model: {model_name}\r\n"
                 f"User-Agent: setu-prisma-client/2.5\r\n\r\n"
             )
             conn_sock.sendall(handshake.encode("utf-8"))
@@ -358,6 +389,8 @@ class PrismaSTTStreamSession(STTStreamSession):
             last_partial_text: str = ""
             pending_utt_ids: set[str] = set()
             last_confidence: float | None = None
+            last_detected_lang_code: str | None = None
+            last_lang_confidence: float | None = None
             speech_detected = False
 
             while time.monotonic() < read_deadline:
@@ -387,8 +420,15 @@ class PrismaSTTStreamSession(STTStreamSession):
 
                 evt_type = evt.get("type")
                 if evt_type == "error":
+                    err_msg = str(evt.get("message") or evt)
+                    if (
+                        ("audio unclear" in err_msg.lower() or "transcription failed" in err_msg.lower())
+                        and not segments
+                        and not last_partial_text
+                    ):
+                        break
                     raise STTProviderError(
-                        f"Prisma v2.5 error event: {evt.get('message') or evt}"
+                        f"Prisma v2.5 error event: {err_msg}"
                     )
                 if evt_type == "speech_start":
                     speech_detected = True
@@ -401,6 +441,16 @@ class PrismaSTTStreamSession(STTStreamSession):
                     is_final = bool(evt.get("is_final", True))
                     if evt.get("confidence") is not None:
                         last_confidence = float(evt["confidence"])
+                    if evt.get("language_confidence") is not None:
+                        last_lang_confidence = float(evt["language_confidence"])
+                    raw_evt_lang = evt.get("detected_language_code") or evt.get("detected_language")
+                    if raw_evt_lang:
+                        last_detected_lang_code = str(raw_evt_lang).strip()
+                    partial_mapped_lang = (
+                        REVERSE_LANGUAGE_MAP.get(last_detected_lang_code.lower(), self._language_hint)
+                        if last_detected_lang_code
+                        else self._language_hint
+                    )
                     if txt and not is_final:
                         speech_detected = True
                         last_partial_text = txt
@@ -410,10 +460,11 @@ class PrismaSTTStreamSession(STTStreamSession):
                                 utterance_id=self._utterance_id,
                                 signal_type=STTSignalType.PARTIAL_TRANSCRIPT,
                                 text=txt,
-                                detected_language=self._language_hint,
-                                language_confidence=0.90,
+                                detected_language=partial_mapped_lang,
+                                language_confidence=last_lang_confidence or 0.90,
                                 transcript_confidence=last_confidence or 0.88,
                                 provider_timestamp=datetime.now(timezone.utc),
+                                raw_detected_language_code=last_detected_lang_code,
                             )
                         )
                     elif is_final:
@@ -435,9 +486,10 @@ class PrismaSTTStreamSession(STTStreamSession):
             return {
                 "signal_type": "final_transcript",
                 "text": final_text,
-                "detected_language": self._language_hint,
+                "detected_language": last_detected_lang_code or self._language_hint,
+                "detected_language_code": last_detected_lang_code,
                 "transcript_confidence": last_confidence or 0.94,
-                "language_confidence": 0.94,
+                "language_confidence": last_lang_confidence or 0.94,
             }
         except STTProviderError:
             raise
@@ -457,11 +509,15 @@ class PrismaSTTStreamSession(STTStreamSession):
     def _sync_http_finalize(self, timeout_sec: float) -> dict[str, Any]:
         combined_pcm = b"".join(c.pcm_bytes for c in self._chunks)
         body = {
-            "model_version": "v2.5",
+            "model_version": "v3.0" if self._auto_detect_language else "v2.5",
             "sample_rate_hz": 16000,
             "encoding": "pcm_s16le",
             "channels": 1,
-            "language_code": LANGUAGE_CODE_MAP[self._language_hint],
+            "language_code": (
+                "indic-auto"
+                if self._auto_detect_language
+                else LANGUAGE_CODE_MAP.get(self._language_hint, "en-IN")
+            ),
             "audio_base64": base64.b64encode(combined_pcm).decode("ascii"),
         }
         req = urllib.request.Request(
@@ -488,7 +544,7 @@ class PrismaSTTStreamSession(STTStreamSession):
 
 
 class GnaniPrismaAdapter(STTAdapter):
-    """Gnani Prisma v2.5 baseline Speech-to-Text adapter."""
+    """Gnani Prisma v2.5 baseline Speech-to-Text adapter with scoped indic-auto support."""
 
     def __init__(
         self,
@@ -515,6 +571,7 @@ class GnaniPrismaAdapter(STTAdapter):
         utterance_id: UUID,
         language_hint: SupportedLanguage,
         timeout_seconds: float,
+        auto_detect_language: bool = False,
     ) -> STTStreamSession:
         if not self._endpoint_url or not self._api_key:
             raise STTProviderError(
@@ -530,4 +587,5 @@ class GnaniPrismaAdapter(STTAdapter):
             endpoint_url=self._endpoint_url,
             api_key=self._api_key,
             finalize_transport=self._finalize_transport,
+            auto_detect_language=auto_detect_language,
         )

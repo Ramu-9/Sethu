@@ -26,11 +26,13 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from backend.app.adapters.base import (
+    ALL_SUPPORTED_LANGUAGES,
     ConversationTurnRecord,
     DialogueContext,
     EmergencyCategory,
     FactConflict,
     FinalizedUtteranceRecord,
+    LanguageSelectionMode,
     PendingQuestionRecord,
     ProvenancedFact,
     ProviderBlockedContentError,
@@ -74,6 +76,50 @@ from backend.app.orchestrator.policy import PolicyValidator, PossiblePrankCallFl
 DEFAULT_CLASSIFICATION_CONFIDENCE_THRESHOLD: float = 0.70
 DEFAULT_PROVIDER_BLOCK_ESCALATION_THRESHOLD: int = 2
 MAX_FALSE_BARGE_INS_BEFORE_MANUAL_ONLY: int = 3
+
+LANGUAGE_DISPLAY_NAMES_BY_CODE: dict[SupportedLanguage, str] = {
+    "en": "English",
+    "te": "Telugu",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "ta": "Tamil",
+    "ml": "Malayalam",
+    "bn": "Bengali",
+}
+
+
+def detect_script_or_lexicon_language(text: str) -> SupportedLanguage | None:
+    """Deterministically detect one of the 7 supported languages from Unicode script or emergency lexicon."""
+    if not text or not text.strip():
+        return None
+    if re.search(r"[\u0C00-\u0C7F]", text):
+        return "te"
+    if re.search(r"[\u0C80-\u0CFF]", text):
+        return "kn"
+    if re.search(r"[\u0B80-\u0BFF]", text):
+        return "ta"
+    if re.search(r"[\u0D00-\u0D7F]", text):
+        return "ml"
+    if re.search(r"[\u0980-\u09FF]", text):
+        return "bn"
+    if re.search(r"[\u0900-\u097F]", text):
+        return "hi"
+    lower = text.lower()
+    if re.search(r"\b(pramadam|jarigindi|ikkada|akkada|manta\w*|gayalu|spruha\s+ledu|opiri\s+adatledu|pampandi)\b", lower):
+        return "te"
+    if re.search(r"\b(agun\s+legeche|durghotona|rokto\s+porche|ekhane|okhane|oshustho|pathan)\b", lower):
+        return "bn"
+    if re.search(r"\b(apaghata|benki|prajne\s+illa|usiraduttilla|kaluhisi)\b", lower):
+        return "kn"
+    if re.search(r"\b(vipathu|neruppu|mayakkam|moochu\s+vidavillai|anuppungal)\b", lower):
+        return "ta"
+    if re.search(r"\b(apaghatam|theepidutham|bodham\s+illa|ayikkoo)\b", lower):
+        return "ml"
+    if re.search(r"\b(aag\s+lagi|hadhsa|ghayal|behosh|bhejiye|yahan|wahan|saans\s+nahi)\b", lower):
+        return "hi"
+    if re.search(r"\b(accident|fire|ambulance|injured|bleeding|unconscious|collapsed|emergency|help|near|there\s+is)\b", lower):
+        return "en"
+    return None
 
 
 class SessionTokenError(PermissionError):
@@ -185,6 +231,8 @@ class IncidentSessionState:
     task_execution_telemetry: dict[str, Any] = field(default_factory=dict)
     superseded_facts: list[FactConflict] = field(default_factory=list)
     location_history: list[dict[str, Any]] = field(default_factory=list)
+    language_mode: LanguageSelectionMode = "manual"
+    detected_languages_seen: list[str] = field(default_factory=list)
 
 
 class SessionOrchestrator:
@@ -241,6 +289,7 @@ class SessionOrchestrator:
         self,
         *,
         initial_language: SupportedLanguage = "en",
+        language_mode: LanguageSelectionMode = "manual",
         now: datetime | None = None,
     ) -> IncidentSessionState:
         """Create a new persistent session and play the pre-synthesized spoken disclosure (Section 2.1)."""
@@ -273,6 +322,8 @@ class SessionOrchestrator:
             classification_attempts=0,
             last_spoken_response_text=disclosure.approved_text,
             last_selected_instruction_id=disclosure.instruction_id,
+            language_mode=language_mode,
+            detected_languages_seen=[initial_language],
         )
         self._sessions[session_id] = state
 
@@ -286,10 +337,108 @@ class SessionOrchestrator:
                 now=ts,
                 details={
                     "initial_language": initial_language,
+                    "language_mode": language_mode,
                     "disclosure_instruction_id": disclosure.instruction_id,
                 },
             )
         )
+        return state
+
+    def set_language_mode(
+        self,
+        session_id: UUID,
+        *,
+        language_mode: LanguageSelectionMode = "manual",
+        manual_language: SupportedLanguage | None = None,
+        now: datetime | None = None,
+    ) -> IncidentSessionState:
+        """Update session language across all 7 supported languages without losing incident state."""
+        ts = now or datetime.now(timezone.utc)
+        state = self.get_session(session_id)
+        prev_mode = state.language_mode
+        prev_lang = state.active_language
+        state.language_mode = language_mode
+        if manual_language in ALL_SUPPORTED_LANGUAGES:
+            state.active_language = manual_language
+            if manual_language not in state.detected_languages_seen:
+                state.detected_languages_seen.append(manual_language)
+        state.revision += 1
+        state.last_event_sequence += 1
+        state.updated_at = ts
+        self._audit.append(
+            AuditEvent.create(
+                session_id=state.session_id,
+                incident_id=state.incident_id,
+                event_type="language_mode_updated",
+                severity=AuditSeverity.INFO,
+                outcome=f"{prev_mode}:{prev_lang}->{language_mode}:{state.active_language}",
+                now=ts,
+                details={
+                    "previous_mode": prev_mode,
+                    "new_mode": language_mode,
+                    "previous_language": prev_lang,
+                    "active_language": state.active_language,
+                },
+            )
+        )
+        if prev_lang != state.active_language:
+            self._audit.append(
+                AuditEvent.create(
+                    session_id=state.session_id,
+                    incident_id=state.incident_id,
+                    event_type="language_switched",
+                    severity=AuditSeverity.INFO,
+                    outcome=f"{prev_lang}->{state.active_language}",
+                    now=ts,
+                    details={
+                        "previous_language": prev_lang,
+                        "new_language": state.active_language,
+                        "language_mode": state.language_mode,
+                    },
+                )
+            )
+        return state
+
+    def record_uncertain_language_detection(
+        self,
+        session_id: UUID,
+        *,
+        raw_detected_language_code: str | None,
+        language_confidence: float | None = None,
+        utterance_id: UUID | None = None,
+        request_clarification_if_needed: bool = False,
+        now: datetime | None = None,
+    ) -> IncidentSessionState:
+        """
+        Keep the session's active_language unchanged when Prisma indic-auto reports an
+        unsupported Indic language (e.g. mr-IN, gu-IN, pa-IN, as-IN) or low confidence,
+        and optionally set a localized clarification prompt without losing emergency context.
+        """
+        ts = now or datetime.now(timezone.utc)
+        state = self.get_session(session_id)
+        self._audit.append(
+            AuditEvent.create(
+                session_id=state.session_id,
+                incident_id=state.incident_id,
+                event_type="language_detection_uncertain",
+                severity=AuditSeverity.WARNING,
+                outcome=f"preserved_{state.active_language}",
+                now=ts,
+                provenance_refs=[str(utterance_id)] if utterance_id else (),
+                details={
+                    "preserved_language": state.active_language,
+                    "raw_detected_language_code": raw_detected_language_code,
+                    "language_confidence": language_confidence,
+                },
+            )
+        )
+        if request_clarification_if_needed:
+            clarify_inst = self._instructions.get_didnt_catch_that_phrase(state.active_language)
+            state.last_spoken_response_text = clarify_inst.approved_text
+            state.last_selected_instruction_id = clarify_inst.instruction_id
+            state.revision += 1
+            state.last_event_sequence += 1
+            state.updated_at = ts
         return state
 
     def get_session(self, session_id: UUID) -> IncidentSessionState:
@@ -454,12 +603,14 @@ class SessionOrchestrator:
         # In DEMO mode, immediately compose spoken confirmation + EN_ROUTE dispatch + safety guidance
         if self._demo_mode:
             lang = state.active_language
-            if lang == "te":
-                ack = "మీ లొకేషన్ నిర్ధారించబడింది."
-            elif lang == "hi":
-                ack = "आपकी लोकेशन कन्फर्म हो गई है।"
-            else:
-                ack = "Thank you, your location is confirmed."
+            ack = {
+                "te": "మీ లొకేషన్ నిర్ధారించబడింది.",
+                "hi": "आपकी लोकेशन कन्फर्म हो गई है।",
+                "kn": "ನಿಮ್ಮ ಸ್ಥಳವನ್ನು ದೃಢೀಕರಿಸಲಾಗಿದೆ.",
+                "ta": "உங்கள் இருப்பிடம் உறுதிப்படுத்தப்பட்டது.",
+                "ml": "നിങ്ങളുടെ ലൊക്കേഷൻ സ്ഥിരീകരിച്ചിരിക്കുന്നു.",
+                "bn": "আপনার লোকেশন নিশ্চিত করা হয়েছে।",
+            }.get(lang, "Thank you, your location is confirmed.")
 
             spoken = self._append_new_demo_dispatch_announcement(state, ack, now=ts)
             context_txt = " ".join(u.text for u in state.utterances)
@@ -533,12 +684,12 @@ class SessionOrchestrator:
                 merged.append(norm)
         lower_ctx = context_text.lower()
         keyword_hazards = (
-            (("vehicle_collision",), ("collid", "collision", "crash", "bus", "truck", "accident")),
-            (("fire",), ("fire", "flames", "burning", "smoke", "आग", "మంట")),
-            (("gas_cylinder",), ("cylinder", "lpg", "gas cylinder", "सिलेंडर", "సిలిండర్")),
-            (("injuries",), ("injur", "bleed", "burn", "hurt", "casualt", "घायल", "గాయ")),
-            (("explosion",), ("blast", "explod", "explosion")),
-            (("trapped_persons",), ("trapped", "stuck inside", "collapse", "debris")),
+            (("vehicle_collision",), ("collid", "collision", "crash", "bus", "truck", "accident", "ప్రమాదం", "दुर्घटना", "ಅಪಘಾತ", "விபத்து", "അപകടം", "দুর্ঘটনা")),
+            (("fire",), ("fire", "flames", "burning", "smoke", "आग", "మంట", "ಬೆಂಕಿ", "தீ", "நெருப்பு", "തീ", "തീപിടുത്തം", "আগুন")),
+            (("gas_cylinder",), ("cylinder", "lpg", "gas cylinder", "सिलेंडर", "సిలిండర్", "ಸಿಲಿಂಡರ್", "சிலிண்டர்", "സിലിണ്ടർ", "সিলিন্ডার")),
+            (("injuries",), ("injur", "bleed", "burn", "hurt", "casualt", "घायल", "గాయ", "ಗಾಯ", "காய", "പരിക്ക്", "আহত")),
+            (("explosion",), ("blast", "explod", "explosion", "పేలుడు", "विस्फोट", "ಸ್ಫೋಟ", "வெடிப்பு", "സ്ഫോടനം", "বিস্ফোরণ")),
+            (("trapped_persons",), ("trapped", "stuck inside", "collapse", "debris", "చిక్కుకు", "फंसे", "ಸಿಲುಕಿ", "சிக்கி", "കുടുങ്ങി", "আটকে")),
         )
         for tags, words in keyword_hazards:
             if any(w in lower_ctx for w in words):
@@ -732,8 +883,10 @@ class SessionOrchestrator:
             re.search(
                 r"\b(fire|flames?|smoke|burning|explo\w*|blast|collaps\w*|trapped|cylinder|lpg|gas|"
                 r"attack\w*|assault\w*|weapon|knife|accident|crash\w*|collid\w*|unconscious|fainted|"
-                r"aag|dhuan|behosh|ghayal|chot|manta|agni|spruha|pramadam)\b|"
-                r"(?:మంట|అగ్ని|పేలుడు|కూలి|సిలిండర్|దాడి|ప్రమాదం|స్పృహ|आग|विस्फोट|इमारत|सिलेंडर|हमला|दुर्घटना|बेहोश)",
+                r"aag|dhuan|behosh|ghayal|chot|manta|agni|spruha|pramadam|benki|thee|neruppu|agun)\b|"
+                r"(?:మంట|అగ్ని|పేలుడు|కూలి|సిలిండర్|దాడి|ప్రమాదం|స్పృహ|आग|विस्फोट|इमारत|सिलेंडर|हमला|दुर्घटना|बेहोश|"
+                r"ಬೆಂಕಿ|ಸ್ಫೋಟ|ಕುಸಿದು|ಸಿಲಿಂಡರ್|ದಾಳಿ|ಅಪಘಾತ|ಪ್ರಜ್ಞೆ|தீ|வெடிப்பு|இடிந்து|சிலிண்டர்|தாக்குதல்|விபத்து|மயக்கம்|"
+                r"തീ|സ്ഫോടനം|ഇടിഞ്ഞു|സിലിണ്ടർ|ആക്രമണം|അപകടം|ബോധമില്ല|আগুন|বিস্ফোরণ|ধসে|সিলিন্ডার|হামলা|দুর্ঘটনা|অজ্ঞান)",
                 utterance_text.lower(),
                 re.I,
             )
@@ -814,20 +967,28 @@ class SessionOrchestrator:
         timeout_seconds: float,
         ts: datetime,
     ) -> IncidentSessionState:
-        # Language switching at utterance boundary without restarting incident (Section 17)
-        if detected_language in ("en", "te", "hi") and detected_language != state.active_language:
-            prev_lang = state.active_language
-            state.active_language = detected_language
-            self._audit.append(
-                AuditEvent.create(
-                    session_id=state.session_id,
-                    incident_id=state.incident_id,
-                    event_type="language_switched",
-                    severity=AuditSeverity.INFO,
-                    outcome=f"{prev_lang}->{detected_language}",
-                    now=ts,
+        # Language switching at utterance boundary across all 7 supported languages without restarting incident (Section 17)
+        if detected_language in ALL_SUPPORTED_LANGUAGES:
+            if detected_language not in state.detected_languages_seen:
+                state.detected_languages_seen.append(detected_language)
+            if detected_language != state.active_language:
+                prev_lang = state.active_language
+                state.active_language = detected_language
+                self._audit.append(
+                    AuditEvent.create(
+                        session_id=state.session_id,
+                        incident_id=state.incident_id,
+                        event_type="language_switched",
+                        severity=AuditSeverity.INFO,
+                        outcome=f"{prev_lang}->{detected_language}",
+                        now=ts,
+                        details={
+                            "previous_language": prev_lang,
+                            "new_language": detected_language,
+                            "language_mode": state.language_mode,
+                        },
+                    )
                 )
-            )
 
         current_record = FinalizedUtteranceRecord(
             utterance_id=utterance_id,

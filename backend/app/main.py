@@ -29,9 +29,11 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from backend.app.adapters.base import (
+    ALL_SUPPORTED_LANGUAGES,
     AdapterError,
     AudioChunk,
     EmergencyCategory,
+    LanguageSelectionMode,
     ProvenancedFact,
     ProviderBlockedContentError,
     ReasoningOutput,
@@ -68,7 +70,11 @@ from backend.app.orchestrator.instructions import InstructionLibrary
 from backend.app.orchestrator.location import GPSPermissionStatus, LocationResolver
 from backend.app.orchestrator.policy import PolicyValidator
 from backend.app.db.pool import NeonPostgresStore
-from backend.app.orchestrator.session import SessionOrchestrator, SessionTokenSigner
+from backend.app.orchestrator.session import (
+    SessionOrchestrator,
+    SessionTokenSigner,
+    detect_script_or_lexicon_language,
+)
 from backend.app.orchestrator.timeout import CallerTimeoutCoordinator
 
 
@@ -93,7 +99,15 @@ def build_default_orchestrator(
     hospital_ranker = HospitalRanker(weights=hospital_weights)
     instruction_lib = InstructionLibrary(
         default_voice_by_lang=(
-            {"en": "Pranav", "te": "Pranav", "hi": "Pranav"}
+            {
+                "en": "Pranav",
+                "te": "Pranav",
+                "hi": "Pranav",
+                "kn": "Pranav",
+                "ta": "Pranav",
+                "ml": "Pranav",
+                "bn": "Pranav",
+            }
             if timbre_gate_0_2_verified
             else None
         ),
@@ -215,6 +229,11 @@ def serialize_session_snapshot(
         "last_event_sequence": state.last_event_sequence,
         "initial_language": state.initial_language,
         "active_language": state.active_language,
+        "language_mode": getattr(state, "language_mode", "manual"),
+        "detected_languages_seen": list(
+            getattr(state, "detected_languages_seen", [state.initial_language])
+            or [state.initial_language]
+        ),
         "category": state.category.value,
         "category_established_above_threshold": state.category_established_above_threshold,
         "classification_attempts": state.classification_attempts,
@@ -424,7 +443,9 @@ class LiveSessionBridge:
             and manifest_ready
         )
         self.gate_0_3_gemini_verified = bool(
-            use_live_providers and self.settings.gate_0_3_gemini_verified
+            use_live_providers
+            and self.settings.gemini_api_key
+            and self.settings.gate_0_3_gemini_verified
         )
 
         (
@@ -478,7 +499,8 @@ class LiveSessionBridge:
         self._last_gemini_status_message: str | None = None
 
     def _refresh_gemini_runtime_status(self, incident_id: UUID) -> None:
-        if not self.gemini_adapter.is_configured:
+        if not self.gemini_adapter.is_configured or self.gemini_adapter.total_transport_calls <= 0:
+            self.gate_0_3_gemini_verified = False
             return
         events = self.audit.list_events(incident_id=incident_id)
         last_turn_idx = max(
@@ -494,9 +516,10 @@ class LiveSessionBridge:
         )
         if outage_event is not None:
             code = outage_event.error_code or "unavailable"
+            diag_cat = self.gemini_adapter.last_diagnostic_category or "upstream_unavailable"
             self.gate_0_3_gemini_verified = False
             self._last_gemini_status_message = (
-                f"Configured ({self.settings.gemini_model_id} HTTP {code} upstream unavailable/quota exceeded; DEMO deterministic fallback active)"
+                f"Configured ({self.settings.gemini_model_id} HTTP {code} [{diag_cat}]; DEMO deterministic fallback active)"
             )
             return
         self.gate_0_3_gemini_verified = True
@@ -529,13 +552,22 @@ class LiveSessionBridge:
     def _get_provider_status(self) -> dict[str, Any]:
         pg_live = bool(self.pg_store is not None and self.pg_store.is_configured)
         return {
+            "multilingual_auto_detect_enabled": self.settings.multilingual_auto_detect_enabled,
             "prisma": {
                 "status": "live_and_verified" if self.gate_0_1_prisma_verified else "unconfigured",
-                "model": "prisma-v2.5",
+                "model": (
+                    "prisma-v2.5 + prisma-v3.0 (indic-auto)"
+                    if self.settings.multilingual_auto_detect_enabled
+                    else "prisma-v2.5"
+                ),
                 "message": (
-                    "Live and verified (Gnani Prisma v2.5 WSS 16 kHz mono PCM streaming)"
-                    if self.gate_0_1_prisma_verified
-                    else "Live STT endpoint not configured in this environment."
+                    "Live and verified (Gnani Prisma WSS 16 kHz mono PCM streaming; 7-language indic-auto ready)"
+                    if (self.gate_0_1_prisma_verified and self.settings.multilingual_auto_detect_enabled)
+                    else (
+                        "Live and verified (Gnani Prisma v2.5 WSS 16 kHz mono PCM streaming)"
+                        if self.gate_0_1_prisma_verified
+                        else "Live STT endpoint not configured in this environment."
+                    )
                 ),
             },
             "timbre": {
@@ -559,6 +591,9 @@ class LiveSessionBridge:
                     )
                 ),
                 "model": self.settings.gemini_model_id,
+                "diagnostic_category": self.gemini_adapter.last_diagnostic_category,
+                "last_http_status": self.gemini_adapter.last_http_status,
+                "last_latency_ms": self.gemini_adapter.last_latency_ms,
                 "message": (
                     f"Live and verified ({self.settings.gemini_model_id})"
                     if self.gate_0_3_gemini_verified
@@ -772,8 +807,12 @@ class LiveSessionBridge:
         prisma_stt_ms: float | None = None,
         vad_finalize_ms: float | None = None,
         emit_event: Callable[[dict[str, Any]], None] | None = None,
+        uncertain_language_detected: bool = False,
     ) -> tuple[Any, dict[str, Any], dict[str, Any] | None, dict[str, Any] | None, dict[str, Any]]:
         import time as _time
+        prev_state = self.orchestrator.get_session(session_id)
+        prev_fact_count = len(prev_state.validated_facts)
+        prev_cat = prev_state.category
         before_samples = self.metrics.get_metric_summary("reasoning_processing_ms").sample_count
         t_r0 = _time.perf_counter()
         state = await self._run_utterance_with_reasoning(
@@ -782,6 +821,14 @@ class LiveSessionBridge:
             text=text,
             detected_language=detected_language,
         )
+        if (
+            uncertain_language_detected
+            and len(state.validated_facts) == prev_fact_count
+            and state.category == prev_cat
+        ):
+            clarify_inst = self.instruction_lib.get_didnt_catch_that_phrase(state.active_language)
+            state.last_spoken_response_text = clarify_inst.approved_text
+            state.last_selected_instruction_id = clarify_inst.instruction_id
         total_process_ms = round((_time.perf_counter() - t_r0) * 1000.0, 1)
         reason_summary = self.metrics.get_metric_summary("reasoning_processing_ms")
         if (
@@ -918,8 +965,13 @@ class LiveSessionBridge:
                     except KeyError:
                         pass
                 lang_raw = payload.get("initial_language", "en")
-                lang: SupportedLanguage = lang_raw if lang_raw in ("en", "te", "hi") else "en"
-                state = self.orchestrator.create_session(initial_language=lang)
+                lang: SupportedLanguage = lang_raw if lang_raw in ALL_SUPPORTED_LANGUAGES else "en"
+                raw_mode = str(payload.get("language_mode", "manual")).strip().lower()
+                lang_mode: LanguageSelectionMode = "auto" if raw_mode == "auto" else "manual"
+                state = self.orchestrator.create_session(
+                    initial_language=lang,
+                    language_mode=lang_mode,
+                )
                 self._active_session_id = state.session_id
                 sid_str = str(state.session_id)
                 self._pcm_chunks_received[sid_str] = 0
@@ -953,6 +1005,39 @@ class LiveSessionBridge:
                     "event": "session_created",
                     "snapshot": snap,
                     "cached_instruction_audio": audio_asset,
+                    "gate_status": {
+                        "gate_0_1_prisma_verified": self.gate_0_1_prisma_verified,
+                        "gate_0_2_timbre_verified": self.gate_0_2_timbre_verified,
+                        "gate_0_3_gemini_verified": self.gate_0_3_gemini_verified,
+                    },
+                    "provider_status": self._get_provider_status(),
+                }
+
+            if msg_type == "set_language_mode":
+                session_id = self._resolve_session_id(payload)
+                raw_mode = str(payload.get("language_mode", "manual")).strip().lower()
+                lang_mode_req: LanguageSelectionMode = "auto" if raw_mode == "auto" else "manual"
+                manual_lang_raw = payload.get("manual_language") or payload.get("language")
+                manual_lang: SupportedLanguage | None = (
+                    manual_lang_raw if manual_lang_raw in ALL_SUPPORTED_LANGUAGES else None
+                )
+                state = self.orchestrator.set_language_mode(
+                    session_id,
+                    language_mode=lang_mode_req,
+                    manual_language=manual_lang,
+                )
+                snap = serialize_session_snapshot(
+                    state.session_id,
+                    self.orchestrator,
+                    self.handoff_gen,
+                    self.audit,
+                )
+                await self._persist_to_postgres_if_configured(state.session_id, snap)
+                return {
+                    "type": "session_state",
+                    "req_id": req_id,
+                    "event": "language_mode_updated",
+                    "snapshot": snap,
                     "gate_status": {
                         "gate_0_1_prisma_verified": self.gate_0_1_prisma_verified,
                         "gate_0_2_timbre_verified": self.gate_0_2_timbre_verified,
@@ -1088,11 +1173,16 @@ class LiveSessionBridge:
                         }
 
                     if stream is None or not getattr(stream, "is_active", False):
+                        use_auto_detect = bool(
+                            getattr(state, "language_mode", "manual") == "auto"
+                            and self.settings.multilingual_auto_detect_enabled
+                        )
                         stream = await self.prisma_adapter.open_stream(
                             session_id=session_id,
                             utterance_id=uuid4(),
                             language_hint=state.active_language,
                             timeout_seconds=2.0,
+                            auto_detect_language=use_auto_detect,
                         )
                         self._active_stt_streams[sid_str] = stream
 
@@ -1146,7 +1236,43 @@ class LiveSessionBridge:
                                         ),
                                         "prisma_transcript": None,
                                     }
+
                             turn_id = str(evt.utterance_id)
+                            is_auto_mode = bool(
+                                getattr(state, "language_mode", "manual") == "auto"
+                                and self.settings.multilingual_auto_detect_enabled
+                            )
+                            low_lang_conf = bool(
+                                evt.language_confidence is not None
+                                and evt.language_confidence < 0.65
+                            )
+                            script_lang = detect_script_or_lexicon_language(evt.text)
+                            if is_auto_mode and (evt.detected_language is None or low_lang_conf):
+                                self.orchestrator.record_uncertain_language_detection(
+                                    session_id,
+                                    raw_detected_language_code=evt.raw_detected_language_code,
+                                    language_confidence=evt.language_confidence,
+                                    utterance_id=evt.utterance_id,
+                                    request_clarification_if_needed=False,
+                                )
+                                effective_detected_lang = state.active_language
+                            elif is_auto_mode and evt.detected_language in ALL_SUPPORTED_LANGUAGES:
+                                if (
+                                    evt.detected_language == "en"
+                                    and state.active_language != "en"
+                                    and script_lang != "en"
+                                ):
+                                    effective_detected_lang = state.active_language
+                                else:
+                                    effective_detected_lang = evt.detected_language
+                            elif (
+                                evt.detected_language in ALL_SUPPORTED_LANGUAGES
+                                and evt.detected_language == state.active_language
+                            ):
+                                effective_detected_lang = state.active_language
+                            else:
+                                # Preserve chosen session language; never silently switch back to English
+                                effective_detected_lang = state.active_language
                             if emit_event is not None:
                                 emit_event(
                                     {
@@ -1155,10 +1281,14 @@ class LiveSessionBridge:
                                         "req_id": req_id,
                                         "turn_id": turn_id,
                                         "transcript": evt.text,
-                                        "detected_language": evt.detected_language or state.active_language,
+                                        "detected_language": effective_detected_lang,
+                                        "raw_detected_language_code": evt.raw_detected_language_code,
                                         "prisma_stt_ms": prisma_stt_ms,
                                     }
                                 )
+                            uncertain_lang_flag = bool(
+                                is_auto_mode and (evt.detected_language is None or low_lang_conf)
+                            )
                             state, snap, live_timbre_payload, audio_asset, stage_latencies = (
                                 await self._finish_utterance_turn(
                                     t_turn0=t_turn0,
@@ -1167,10 +1297,11 @@ class LiveSessionBridge:
                                     session_id=session_id,
                                     utterance_id=evt.utterance_id,
                                     text=evt.text,
-                                    detected_language=evt.detected_language or state.active_language,
+                                    detected_language=effective_detected_lang,
                                     prisma_stt_ms=prisma_stt_ms,
                                     vad_finalize_ms=vad_finalize_ms,
                                     emit_event=emit_event,
+                                    uncertain_language_detected=uncertain_lang_flag,
                                 )
                             )
                             return {
@@ -1180,7 +1311,8 @@ class LiveSessionBridge:
                                 "event": "prisma_finalized_utterance_processed",
                                 "snapshot": snap,
                                 "prisma_transcript": evt.text,
-                                "prisma_detected_language": evt.detected_language,
+                                "prisma_detected_language": effective_detected_lang,
+                                "prisma_raw_detected_language_code": evt.raw_detected_language_code,
                                 "live_timbre_audio": live_timbre_payload,
                                 "cached_instruction_audio": audio_asset,
                                 "stage_latencies": stage_latencies,
@@ -1332,6 +1464,10 @@ class LiveSessionBridge:
                 prompt_by_lang = {
                     "te": "సరే, దయచేసి మీ ఖచ్చితమైన ప్రదేశం లేదా సమీప ల్యాండ్‌మార్క్ చెప్పండి.",
                     "hi": "ठीक है, कृपया अपना सटीक स्थान या पास का कोई लैंडमार्क बताइए।",
+                    "kn": "ಸರಿ, ದಯವಿಟ್ಟು ನಿಮ್ಮ ನಿಖರವಾದ ಸ್ಥಳ ಅಥವಾ ಹತ್ತಿರದ ಲ್ಯಾಂಡ್‌ಮಾರ್ಕ್ ತಿಳಿಸಿ.",
+                    "ta": "சரி, தயவுசெய்து உங்கள் துல்லியமான இடம் அல்லது அருகிலுள்ள அடையாளத்தைச் சொல்லுங்கள்.",
+                    "ml": "ശരി, ദയവായി നിങ്ങളുടെ കൃത്യമായ സ്ഥലം അല്ലെങ്കിൽ അടുത്തുള്ള ലാൻഡ്‌മാർക്ക് പറയുക.",
+                    "bn": "ঠিক আছে, অনুগ্রহ করে আপনার সঠিক স্থান বা কাছের কোনো ল্যান্ডমার্ক বলুন।",
                 }
                 state.last_spoken_response_text = prompt_by_lang.get(
                     state.active_language,
@@ -1434,10 +1570,13 @@ class LiveSessionBridge:
             if msg_type == "scripted_finalized_utterance":
                 # Executes the authoritative Python SessionOrchestrator pipeline for a scripted test turn
                 session_id = self._resolve_session_id(payload)
+                current_state = self.orchestrator.get_session(session_id)
                 utt_id = UUID(str(payload.get("utterance_id") or uuid4()))
                 text = str(payload["text"])
-                lang_in = payload.get("language", "en")
-                det_lang: SupportedLanguage = lang_in if lang_in in ("en", "te", "hi") else "en"
+                lang_in = payload.get("language")
+                det_lang: SupportedLanguage = (
+                    lang_in if lang_in in ALL_SUPPORTED_LANGUAGES else current_state.active_language
+                )
 
                 sim_block = bool(payload.get("simulate_provider_block", False))
                 sim_outage = bool(payload.get("simulate_provider_outage", False))
@@ -1597,11 +1736,26 @@ class LiveSessionBridge:
                 import time as _time
                 t_turn0 = _time.perf_counter()
                 session_id = self._resolve_session_id(payload)
+                current_state = self.orchestrator.get_session(session_id)
                 utt_id = UUID(str(payload.get("utterance_id") or uuid4()))
                 turn_id = str(utt_id)
                 text = str(payload["text"])
-                lang_in = payload.get("language", "en")
-                det_lang: SupportedLanguage = lang_in if lang_in in ("en", "te", "hi") else "en"
+                lang_in = payload.get("language")
+
+                script_lang = detect_script_or_lexicon_language(text)
+                if lang_in in ALL_SUPPORTED_LANGUAGES:
+                    if (
+                        lang_in == "en"
+                        and current_state.active_language != "en"
+                        and script_lang != "en"
+                    ):
+                        det_lang: SupportedLanguage = current_state.active_language
+                    else:
+                        det_lang = lang_in
+                elif script_lang in ALL_SUPPORTED_LANGUAGES:
+                    det_lang = script_lang
+                else:
+                    det_lang = current_state.active_language
 
                 state, snap, live_timbre_payload, audio_asset, stage_latencies = (
                     await self._finish_utterance_turn(
@@ -1638,7 +1792,7 @@ class LiveSessionBridge:
                 session_id = self._resolve_session_id(payload)
                 text = str(payload.get("text") or "In this simulation, SETU is staying on the line with you.")
                 lang_in = payload.get("language", "en")
-                lang: SupportedLanguage = lang_in if lang_in in ("en", "te", "hi") else "en"
+                lang: SupportedLanguage = lang_in if lang_in in ALL_SUPPORTED_LANGUAGES else "en"
                 timbre_payload = await self._synthesize_timbre_payload(
                     session_id=session_id,
                     text=text,

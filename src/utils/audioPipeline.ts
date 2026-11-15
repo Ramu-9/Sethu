@@ -356,6 +356,9 @@ export class SetuWebAudioController {
       sequence_number: number;
       sample_rate_hz: number;
       rms_level: number;
+      peak_level: number;
+      clipped_samples: number;
+      zero_crossing_rate: number;
       pcm_base64: string;
     }) => void,
     onFloat32Frame?: (samples: Float32Array) => void,
@@ -406,18 +409,43 @@ export class SetuWebAudioController {
         const int16 = new Int16Array(data.pcm16_buffer);
         ringBuffer.pushFrame(int16);
 
-        if (onFloat32Frame) {
-          const f32 = new Float32Array(int16.length);
-          for (let i = 0; i < int16.length; i++) {
-            f32[i] = int16[i] / 32768.0;
+        let maxAbs = 0;
+        let clippedCount = 0;
+        let zeroCrossings = 0;
+        const len = int16.length;
+        const f32 = onFloat32Frame ? new Float32Array(len) : null;
+
+        for (let i = 0; i < len; i++) {
+          const sample = int16[i];
+          const absVal = sample < 0 ? -sample : sample;
+          if (absVal > maxAbs) {
+            maxAbs = absVal;
           }
+          if (absVal >= 32112) {
+            clippedCount += 1;
+          }
+          if (i > 0 && ((sample >= 0 && int16[i - 1] < 0) || (sample < 0 && int16[i - 1] >= 0))) {
+            zeroCrossings += 1;
+          }
+          if (f32) {
+            f32[i] = sample / 32768.0;
+          }
+        }
+
+        if (f32 && onFloat32Frame) {
           onFloat32Frame(f32);
         }
+
+        const peakLevel = len > 0 ? maxAbs / 32768.0 : 0;
+        const zcr = len > 1 ? zeroCrossings / (len - 1) : 0;
 
         onPcmFrame({
           sequence_number: Number(data.sequence_number),
           sample_rate_hz: Number(data.sample_rate_hz || 16000),
           rms_level: Number(data.rms_level || 0),
+          peak_level: peakLevel,
+          clipped_samples: clippedCount,
+          zero_crossing_rate: zcr,
           pcm_base64: arrayBufferToBase64(data.pcm16_buffer),
         });
       }

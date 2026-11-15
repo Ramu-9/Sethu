@@ -51,32 +51,43 @@ _HIGH_ACUITY_CLINICAL_PATTERNS = re.compile(
     r"trapped|stuck\s+inside|heart\s+attack|cardiac\s+arrest|stroke|seizure|"
     r"gas\s+cylinder|lpg\s+cylinder|cylinder\s+blast|explosion|building\s+collapse|"
     r"physical\s+attack|stabbed|shot|weapon|assault|"
-    r"behosh|saans\s+nahi|spruha\s+ledu"
+    r"behosh|saans\s+nahi|spruha\s+ledu|opiri\s+adatledu|ikkada\s+accident|"
+    r"agun\s+legeche|oshustho|behosh\s+hoye|atke\s+ache|rokto\s+porche|"
+    r"prajne\s+illa|usiraduttilla|mayakkam|moochu\s+vidavillai|bodham\s+illa|oggyan"
     r")\b|"
     r"(?:స్పృహ(?:లో)?\s*(?:లేదు|లేరు)|స్పృహ\s*కోల్పో|శ్వాస\s*ఆడటం\s*లేదు|అపస్మారక|చిక్కుకుపో|సిలిండర్|పేలుడు|కూలిపోయి|"
-    r"बेहोश|सांस\s*नहीं|फंसे\s*हुए|गंभीर\s*घायल|सिलेंडर|विस्फोट|इमारत\s*गिर)",
+    r"बेहोश|सांस\s*नहीं|फंसे\s*हुए|गंभीर\s*घायल|सिलेंडर|विस्फोट|इमारत\s*गिर|"
+    r"ಪ್ರಜ್ಞೆ\s*ಇಲ್ಲ|ಪ್ರಜ್ಞಾಹೀನ|ಉಸಿರಾಡುತ್ತಿಲ್ಲ|ಸಿಲುಕಿ|ಸಿಲಿಂಡರ್|ಸ್ಫೋಟ|ಕುಸಿದು|"
+    r"மயக்கம்|சுயநினைவு\s*இல்லை|மூச்சு\s*விடவில்லை|சிக்கி|சிலிண்டர்|வெடிப்பு|இடிந்து|"
+    r"ബോധമില്ല|ബോധരഹിത|ശ്വാസമില്ല|കുടുങ്ങി|സിലിണ്ടർ|സ്ഫോടനം|ഇടിഞ്ഞു|"
+    r"অজ্ঞান|জ্ঞান\s*নেই|শ্বাস\s*নিচ্ছে\s*না|আটকে|সিলিন্ডার|বিস্ফোরণ|ধসে)",
     re.I,
 )
 
 _CORRECTION_CUE_PATTERNS = re.compile(
     r"\b("
     r"actually|no\s+wait|wait\s+no|sorry\s+i\s+meant|correction|wrong\s+location|"
-    r"not\s+at|not\s+near|instead\s+of|changed\s+to|i\s+said\s+earlier\s+but"
+    r"not\s+at|not\s+near|instead\s+of|changed\s+to|i\s+said\s+earlier\s+but|"
+    r"kadu\s+akkada\s+kadu|bhul\s+kore|okhane\s+noy|alli\s+alla|ange\s+illai|avide\s+alla"
     r")\b|"
-    r"(?:కాదు\s*అక్కడ\s*కాదు|క్షమించండి\s*నేను|తప్పుగా\s*చెప్పా|नहीं\s*वहां\s*नहीं|गलती\s*से|माफ़\s*कीजिए)",
+    r"(?:కాదు\s*అక్కడ\s*కాదు|క్షమించండి\s*నేను|తప్పుగా\s*చెప్పా|नहीं\s*वहां\s*नहीं|गलती\s*से|माफ़\s*कीजिए|"
+    r"ಅಲ್ಲ\s*ಅಲ್ಲಿ\s*ಅಲ್ಲ|ತಪ್ಪಾಗಿ\s*ಹೇಳಿದೆ|క్షಮಿಸಿ|"
+    r"இல்லை\s*அங்கே\s*இல்லை|தவறாகச்\s*சொன்னேன்|மன்னிக்கவும்|"
+    r"അല്ല\s*അവിടെയല്ല|തെറ്റി\s*പറഞ്ഞു|ക്ഷമിക്കണം|"
+    r"না\s*ওখানে\s*নয়|ভুল\s*বলেছি|দুঃখিত)",
     re.I,
 )
 
 _HAZARD_DETECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("vehicle_collision", re.compile(r"\b(collid\w*|collision|crash\w*|accident|bus|truck|lorry|car\s+hit)\b|ప్రమాదం|दुर्घटना|टक्कर", re.I)),
-    ("fire", re.compile(r"\b(fire|flames|burning|smoke|blaze|aag|manta\w*)\b|మంట|అగ్ని|आग|धुआं", re.I)),
-    ("gas_cylinder", re.compile(r"\b(cylinder|lpg|gas\s+cylinder)\b|సిలిండర్|सिलेंडर", re.I)),
-    ("gas_leak", re.compile(r"\b(gas\s+leak\w*|leaking\s+gas|smell\s+of\s+gas)\b|గ్యాస్\s*లీక్|गैस\s*लीक", re.I)),
-    ("injuries", re.compile(r"\b(injur\w*|hurt|bleed\w*|burn\w*|casualt\w*|unconscious|fainted)\b|గాయ|స్పృహ|घायल|खून|बेहोश", re.I)),
-    ("explosion", re.compile(r"\b(explod\w*|explosion|blast)\b|పేలుడు|विस्फोट|धमाका", re.I)),
-    ("building_collapse", re.compile(r"\b(building\s+collapse\w*|roof\s+collapse\w*|structure\s+collapse\w*)\b|కూలిపోయి|इमारत\s*गिर", re.I)),
-    ("trapped_persons", re.compile(r"\b(trapped|stuck\s+inside|pinned\s+under|under\s+debris)\b|చిక్కుకు|फंसे", re.I)),
-    ("assault", re.compile(r"\b(attack\w*|assault\w*|weapon|knife|stab\w*|fight\w*)\b|దాడి|हमला|हथियार", re.I)),
+    ("vehicle_collision", re.compile(r"\b(collid\w*|collision|crash\w*|accident|bus|truck|lorry|car\s+hit|pramadam|jarigindi|dhakka\s+mereche|accident\s+hoyeche|apaghata|vipathu|apaghatam|durghotona)\b|ప్రమాదం|दुर्घटना|टक्कर|ಅಪಘಾತ|ಡಿಕ್ಕಿ|விபத்து|மோதல்|അപകടം|ഇടിച്ചു|দুর্ঘটনা|ধাক্কা", re.I)),
+    ("fire", re.compile(r"\b(fire|flames|burning|smoke|blaze|aag|manta\w*|agun|agun\s+legeche|dhoya|benki|thee|neruppu)\b|మంట|అగ్ని|आग|धुआं|ಬೆಂಕಿ|ಹೊಗೆ|தீ|நெருப்பு|புகை|തീ|തീപിടുത്തം|പുക|আগুন|ধোঁয়া", re.I)),
+    ("gas_cylinder", re.compile(r"\b(cylinder|lpg|gas\s+cylinder|silindar)\b|సిలిండర్|सिलेंडर|ಸಿಲಿಂಡರ್|சிலிண்டர்|സിലിണ്ടർ|সিলিন্ডার", re.I)),
+    ("gas_leak", re.compile(r"\b(gas\s+leak\w*|leaking\s+gas|smell\s+of\s+gas|gas\s+berocche)\b|గ్యాస్\s*లీక్|गैस\s*लीक|ಗ್ಯಾಸ್\s*ಲೀಕ್|கேஸ்\s*கசிவு|ഗ്യാസ്\s*ലീക്ക്|গ্যাস\s*লিক", re.I)),
+    ("injuries", re.compile(r"\b(injur\w*|hurt|bleed\w*|burn\w*|casualt\w*|unconscious|fainted|behosh|behosh\s+hoye|oshustho|ahoto|rokto|gayalu|spruha\s+ledu|opiri\s+adatledu|prajne\s+illa|mayakkam|bodham\s+illa|oggyan)\b|గాయ|స్పృహ|घायल|खून|बेहोश|ಗಾಯ|ರಕ್ತ|ಪ್ರಜ್ಞೆ|காய|ரத்தம்|மயக்கம்|പരിക്ക്|രക്തം|ബോധമില്ല|আহত|রক্ত|অজ্ঞান", re.I)),
+    ("explosion", re.compile(r"\b(explod\w*|explosion|blast|boma|fatche|peludu|sphota|vedippu|sphodanam|bisforon)\b|పేలుడు|विस्फोट|धमाका|ಸ್ಫೋಟ|வெடிப்பு|സ്ഫോടനം|বিস্ফোরণ", re.I)),
+    ("building_collapse", re.compile(r"\b(building\s+collapse\w*|roof\s+collapse\w*|structure\s+collapse\w*|bhenge\s+poreche|kulipoyindi|kusidu|idinju)\b|కూలిపోయి|इमारत\s*गिर|ಕುಸಿದು|இடிந்து|ഇടിഞ്ഞു|ধসে", re.I)),
+    ("trapped_persons", re.compile(r"\b(trapped|stuck\s+inside|pinned\s+under|under\s+debris|atke\s+ache|chikkukunnaru|siluki|sikki|kudungi)\b|చిక్కుకు|फंसे|ಸಿಲುಕಿ|சிக்கி|കുടുങ്ങി|আটকে", re.I)),
+    ("assault", re.compile(r"\b(attack\w*|assault\w*|weapon|knife|stab\w*|fight\w*|hamla|dadi)\b|దాడి|हमला|हथियार|ದಾಳಿ|ಚಾಕು|தாக்குதல்|கத்தி|ആക്രമണം|കത്തി|হামলা|ছুরি", re.I)),
 )
 
 
@@ -128,7 +139,7 @@ def select_adaptive_thinking_level(context: DialogueContext) -> Literal["LOW", "
     if _HIGH_ACUITY_CLINICAL_PATTERNS.search(utt_text):
         return "MEDIUM"
 
-    # 2. Check if caller is correcting or contradicting previously validated facts
+    # 2. Check if caller is correcting or contradicting previously established facts
     if context.validated_facts and _CORRECTION_CUE_PATTERNS.search(utt_text):
         return "MEDIUM"
 
@@ -144,7 +155,8 @@ def select_adaptive_thinking_level(context: DialogueContext) -> Literal["LOW", "
         re.match(
             r"^(?:yes|yeah|yep|no|nope|none|nobody|one|two|three|four|five|\d+|"
             r"two\s+people|three\s+people|one\s+person|location\s+confirmed|confirm\s+location|"
-            r"అవును|లేదు|ఒకరు|ఇద్దరు|हाँ|जी|नहीं|एक|दो)\b[.!]?$",
+            r"అవును|లేదు|ఒకరు|ఇద్దరు|हाँ|जी|नहीं|एक|दो|"
+            r"ಹೌದು|ಇಲ್ಲ|ಒಬ್ಬರು|ಇಬ್ಬರು|ஆம்|இல்லை|ஒருவர்|இருவர்|അതെ|ഇല്ല|ഒരാൾ|രണ്ടുപേർ|হ্যাঁ|না|একজন|দুজন)\b[.!]?$",
             lower_utt,
             re.I,
         )
@@ -292,7 +304,7 @@ def build_compact_dialogue_prompt(context: DialogueContext) -> tuple[str, str]:
     system_instruction = (
         "You are SETU, an attentive, empathetic human-like emergency coordination voice assistant "
         "(prototype for India; NOT 112). "
-        "Respond in 1-2 natural, supportive sentences in Active Language ('en', 'te', 'hi', or natural Tanglish/Hinglish matching the caller). "
+        "Respond in 1-2 natural, supportive sentences in Active Language ('en', 'te', 'hi', 'kn', 'ta', 'ml', 'bn', or natural code-mixed speech matching the caller). "
         "Acknowledge what the caller just said warmly, avoid repetitive phrases, and maintain full continuity. "
         "Categories: medical_emergency, fire, fire_with_injuries, road_accident, building_collapse, physical_attack, gas_leak, explosion, unknown. "
         "Roles: new_description, answer_to_pending_question, acknowledgement, other. "
@@ -442,11 +454,20 @@ def build_gemini_rest_transport(
             f'"selected_instruction_id": "{eligible_ids[0]}", '
             f'"caller_response_text": "..."}}.'
         )
+        effective_model_id = (
+            "gemini-3.1-flash-lite"
+            if model_id in ("gemini-3.8-flash", "gemini-4-hydrogen", "gemini-3.1-flash-lite")
+            else model_id
+        )
         gen_config: dict[str, Any] = {
             "temperature": 0.2,
         }
-        if model_id.startswith("gemini-3"):
-            gen_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+        if effective_model_id.startswith("gemini-3"):
+            gen_config["thinkingConfig"] = {
+                "thinkingLevel": (
+                    "MINIMAL" if "flash-lite" in effective_model_id else thinking_level
+                )
+            }
 
         request_body = {
             "systemInstruction": {"parts": [{"text": system_instruction + schema_contract}]},
@@ -456,8 +477,8 @@ def build_gemini_rest_transport(
         encoded_body = json.dumps(request_body).encode("utf-8")
 
         rem = max(0.5, timeout_sec - (time.monotonic() - t0))
-        request_timeout = max(0.4, min(rem - 0.15, 5.5))
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
+        request_timeout = max(0.4, rem - 0.15)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{effective_model_id}:generateContent?key={api_key}"
         req = urllib.request.Request(
             url,
             data=encoded_body,
@@ -607,6 +628,8 @@ def build_gemini_rest_transport(
                 fname = str(rf.get("field_name") or rf.get("field") or "").strip()
                 if not fname:
                     continue
+                if fname.lower() in ("location", "landmark", "caller_landmark", "address", "incident_location"):
+                    fname = "caller_location_text"
                 raw_val: bool | int | str | None = rf.get("value")
                 if isinstance(raw_val, str):
                     lowered_val = raw_val.strip().lower()
@@ -743,6 +766,47 @@ def build_gemini_rest_transport(
     return _async_transport
 
 
+def classify_gemini_diagnostic_failure(exc: BaseException) -> dict[str, Any]:
+    """
+    Classify a Gemini reasoning error into a structured diagnostic category
+    without exposing credentials or raw keys.
+    """
+    if isinstance(exc, ProviderBlockedContentError):
+        return {
+            "category": "provider_blocked_content",
+            "http_status": 200,
+            "summary": str(exc)[:200],
+        }
+    if isinstance(exc, ReasoningSchemaValidationError):
+        return {
+            "category": "schema_validation_failed",
+            "http_status": 200,
+            "summary": str(exc)[:200],
+        }
+    http_status = getattr(exc, "http_status", None)
+    msg = str(exc)
+    if http_status == 400:
+        cat = "http_400_invalid_request_or_model"
+    elif http_status in (401, 403):
+        cat = "http_401_403_auth_or_key_invalid"
+    elif http_status == 404:
+        cat = "http_404_model_not_found"
+    elif http_status == 429:
+        cat = "http_429_rate_limit_or_quota"
+    elif http_status in (500, 502, 503, 504):
+        cat = "http_5xx_upstream_unavailable"
+    elif http_status == 408 or "timed out" in msg.lower() or isinstance(exc, asyncio.TimeoutError):
+        cat = "timeout_exceeded"
+        http_status = http_status or 408
+    else:
+        cat = "network_or_upstream_unavailable"
+    return {
+        "category": cat,
+        "http_status": http_status,
+        "summary": msg[:200],
+    }
+
+
 class GeminiReasoningAdapter(ReasoningAdapter):
     """
     Provider-agnostic Google Gemini reasoning adapter with:
@@ -767,6 +831,10 @@ class GeminiReasoningAdapter(ReasoningAdapter):
         self.deduplicated_retransmission_hits: int = 0
         self.inflight_coalesced_hits: int = 0
         self.thinking_level_counts: dict[str, int] = {"LOW": 0, "MEDIUM": 0}
+        self.last_diagnostic_category: str | None = None
+        self.last_http_status: int | None = None
+        self.last_latency_ms: float | None = None
+        self.last_error_summary: str | None = None
 
     @property
     def model_id(self) -> str | None:
@@ -777,7 +845,7 @@ class GeminiReasoningAdapter(ReasoningAdapter):
         return bool(self._model_id and self._transport is not None)
 
     def get_usage_telemetry(self) -> dict[str, Any]:
-        """Return adapter-level request, deduplication, coalescing, and thinking depth counters."""
+        """Return adapter-level request, deduplication, coalescing, thinking depth, and diagnostic counters."""
         return {
             "model_id": self._model_id,
             "total_transport_calls": self.total_transport_calls,
@@ -787,6 +855,10 @@ class GeminiReasoningAdapter(ReasoningAdapter):
                 self.deduplicated_retransmission_hits + self.inflight_coalesced_hits
             ),
             "thinking_level_counts": dict(self.thinking_level_counts),
+            "last_diagnostic_category": self.last_diagnostic_category,
+            "last_http_status": self.last_http_status,
+            "last_latency_ms": self.last_latency_ms,
+            "last_error_summary": self.last_error_summary,
         }
 
     async def analyze_utterance(
@@ -878,6 +950,7 @@ class GeminiReasoningAdapter(ReasoningAdapter):
                     is_retryable=False,
                 )
 
+            t_attempt0 = time.perf_counter()
             try:
                 self.total_transport_calls += 1
                 output = await asyncio.wait_for(
@@ -887,22 +960,39 @@ class GeminiReasoningAdapter(ReasoningAdapter):
                 if getattr(output, "thinking_level", None) != selected_thinking:
                     output = dc_replace(output, thinking_level=selected_thinking)
                 output.validate_against_context(context)
+                self.last_diagnostic_category = "ok"
+                self.last_http_status = 200
+                self.last_latency_ms = round((time.perf_counter() - t_attempt0) * 1000.0, 2)
+                self.last_error_summary = None
                 return output
-            except (ProviderBlockedContentError, ReasoningSchemaValidationError):
+            except (ProviderBlockedContentError, ReasoningSchemaValidationError) as exc:
                 # Never retry safety-filter blocks or schema validation failures (Section 23.2)
+                diag = classify_gemini_diagnostic_failure(exc)
+                self.last_diagnostic_category = diag["category"]
+                self.last_http_status = diag["http_status"]
+                self.last_latency_ms = round((time.perf_counter() - t_attempt0) * 1000.0, 2)
+                self.last_error_summary = diag["summary"]
                 raise
             except asyncio.TimeoutError as exc:
                 err = ReasoningUnavailableError(
                     "Reasoning request timed out.",
                     session_id=context.session_id,
                     utterance_id=context.current_utterance.utterance_id,
-                    is_retryable=True,
+                    is_retryable=False,
                     http_status=408,
                 )
-                if attempts >= max_attempts or (deadline - time.monotonic()) <= DEFAULT_RETRY_DELAY_SECONDS:
-                    raise err from exc
-                retry_delay = DEFAULT_RETRY_DELAY_SECONDS
+                diag = classify_gemini_diagnostic_failure(err)
+                self.last_diagnostic_category = diag["category"]
+                self.last_http_status = diag["http_status"]
+                self.last_latency_ms = round((time.perf_counter() - t_attempt0) * 1000.0, 2)
+                self.last_error_summary = diag["summary"]
+                raise err from exc
             except ReasoningUnavailableError as exc:
+                diag = classify_gemini_diagnostic_failure(exc)
+                self.last_diagnostic_category = diag["category"]
+                self.last_http_status = diag["http_status"]
+                self.last_latency_ms = round((time.perf_counter() - t_attempt0) * 1000.0, 2)
+                self.last_error_summary = diag["summary"]
                 if not exc.is_retryable or attempts >= max_attempts:
                     raise
                 retry_delay = (

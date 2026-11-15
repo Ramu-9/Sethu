@@ -56,6 +56,7 @@ export class SileroVadDetector {
   // Runtime tracking
   private isSpeaking = false;
   private speechStartTimestamp = 0;
+  private activeSpeechFramesCount = 0;
   private consecutiveSpeechFrames = 0;
   private consecutiveSilenceFrames = 0;
   private silenceFramesThreshold: number;
@@ -236,29 +237,53 @@ export class SileroVadDetector {
 
     if (prob >= this.positiveThreshold) {
       this.consecutiveSpeechFrames += 1;
-      this.consecutiveSilenceFrames = 0;
-
-      if (!this.isSpeaking && this.consecutiveSpeechFrames >= this.redemptionFrames) {
-        this.isSpeaking = true;
-        this.speechStartTimestamp = now;
-        this.callbacks.onSpeechStart?.();
-      } else if (this.isSpeaking && now - this.speechStartTimestamp >= this.maxSpeechDurationMs) {
-        this.isSpeaking = false;
+      if (!this.isSpeaking) {
         this.consecutiveSilenceFrames = 0;
-        this.consecutiveSpeechFrames = 0;
-        this.callbacks.onSpeechEnd?.();
+        if (this.consecutiveSpeechFrames >= this.redemptionFrames) {
+          this.isSpeaking = true;
+          this.speechStartTimestamp = now;
+          this.activeSpeechFramesCount = this.consecutiveSpeechFrames;
+          this.callbacks.onSpeechStart?.();
+        }
+      } else {
+        this.activeSpeechFramesCount += 1;
+        // While already speaking, require 2 consecutive positive frames to fully clear accumulated silence
+        // so a single 32ms ambient click does not lock the detector in 'Hearing you…'
+        if (this.consecutiveSpeechFrames >= 2) {
+          this.consecutiveSilenceFrames = 0;
+        } else {
+          this.consecutiveSilenceFrames = Math.max(0, this.consecutiveSilenceFrames - 2);
+        }
+        const speechDuration = Math.max(
+          now - this.speechStartTimestamp,
+          this.activeSpeechFramesCount * 32,
+        );
+        if (speechDuration >= this.maxSpeechDurationMs) {
+          this.isSpeaking = false;
+          this.activeSpeechFramesCount = 0;
+          this.consecutiveSilenceFrames = 0;
+          this.consecutiveSpeechFrames = 0;
+          this.callbacks.onSpeechEnd?.();
+        }
       }
-    } else if (prob < this.negativeThreshold) {
-      this.consecutiveSilenceFrames += 1;
+    } else {
       this.consecutiveSpeechFrames = 0;
-
       if (this.isSpeaking) {
-        const speechDuration = now - this.speechStartTimestamp;
+        // Count full silence frame below negativeThreshold, and half-step in the hysteresis band
+        // so moderate room noise after speech never traps the state in 'Hearing you…'
+        const silenceIncrement = prob < this.negativeThreshold ? 1 : 0.5;
+        this.consecutiveSilenceFrames += silenceIncrement;
+
+        const speechDuration = Math.max(
+          now - this.speechStartTimestamp,
+          this.activeSpeechFramesCount * 32,
+        );
         const reachedSilenceLimit = this.consecutiveSilenceFrames >= this.silenceFramesThreshold;
         const reachedMaxDuration = speechDuration >= this.maxSpeechDurationMs;
 
         if (reachedSilenceLimit || reachedMaxDuration) {
           this.isSpeaking = false;
+          this.activeSpeechFramesCount = 0;
           this.consecutiveSilenceFrames = 0;
           this.consecutiveSpeechFrames = 0;
 
@@ -269,11 +294,6 @@ export class SileroVadDetector {
           }
         }
       }
-    } else if (this.isSpeaking && now - this.speechStartTimestamp >= this.maxSpeechDurationMs) {
-      this.isSpeaking = false;
-      this.consecutiveSilenceFrames = 0;
-      this.consecutiveSpeechFrames = 0;
-      this.callbacks.onSpeechEnd?.();
     }
   }
 
@@ -281,6 +301,7 @@ export class SileroVadDetector {
     this.resetEpoch += 1;
     this.isSpeaking = false;
     this.speechStartTimestamp = 0;
+    this.activeSpeechFramesCount = 0;
     this.consecutiveSpeechFrames = 0;
     this.consecutiveSilenceFrames = 0;
     this.sampleBuffer.length = 0;

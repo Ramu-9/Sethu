@@ -84,6 +84,7 @@ class Settings:
         "postgresql+asyncpg://setu_owner:setu_owner_dev_password@localhost:5432/setu"
     )
     gemini_fallback_api_keys: tuple[str, ...] = ()
+    multilingual_auto_detect_enabled: bool = False
 
 
 def _parse_bool(raw: str | None, default: bool = False) -> bool:
@@ -165,4 +166,8 @@ def load_settings(env_override: dict[str, str] | None = None) -> Settings:
         hospital_weights=hospital_weights,
         timeout_policy=timeout_policy,
         gemini_fallback_api_keys=tuple(fallback_keys),
+        multilingual_auto_detect_enabled=_parse_bool(
+            env.get("MULTILINGUAL_AUTO_DETECT_ENABLED"),
+            False,
+        ),
     )

@@ -14,7 +14,19 @@ from typing import Any, Literal, Protocol
 from uuid import UUID
 
 
-SupportedLanguage = Literal["en", "te", "hi"]
+SupportedLanguage = Literal["en", "te", "hi", "kn", "ta", "ml", "bn"]
+LanguageSelectionMode = Literal["manual", "auto"]
+
+CORE_MANUAL_LANGUAGES: tuple[SupportedLanguage, ...] = ("en", "te", "hi")
+ALL_SUPPORTED_LANGUAGES: tuple[SupportedLanguage, ...] = (
+    "en",
+    "te",
+    "hi",
+    "kn",
+    "ta",
+    "ml",
+    "bn",
+)
 
 
 class EmergencyCategory(str, Enum):
@@ -99,6 +111,7 @@ class TranscriptEvent:
     language_confidence: float | None
     transcript_confidence: float | None
     provider_timestamp: datetime
+    raw_detected_language_code: str | None = None
 
 
 @dataclass(frozen=True)

@@ -15,6 +15,8 @@ export interface SetuMapLibreProps {
   locationSource: 'browser_gps' | 'landmark' | 'unresolved';
   confirmationStatus: LocationConfirmationStatus;
   matchedLandmarkId: string | null;
+  callerLandmarkText?: string | null;
+  broadLocationText?: string | null;
   activeAssignments?: SimulatedAssignment[];
   onSelectLandmark?: (landmark: SyntheticLandmark) => void;
 }
@@ -82,6 +84,8 @@ export const SetuMapLibre: React.FC<SetuMapLibreProps> = ({
   locationSource,
   confirmationStatus,
   matchedLandmarkId,
+  callerLandmarkText = null,
+  broadLocationText = null,
   activeAssignments = [],
   onSelectLandmark,
 }) => {
@@ -103,9 +107,13 @@ export const SetuMapLibre: React.FC<SetuMapLibreProps> = ({
     }>
   >([]);
 
-  const matchedLandmark = SYNTHETIC_LANDMARKS.find(
-    (lm) => lm.landmark_id === matchedLandmarkId,
-  );
+  const matchedLandmark =
+    SYNTHETIC_LANDMARKS.find((lm) => lm.landmark_id === matchedLandmarkId) ??
+    SYNTHETIC_LANDMARKS.find(
+      (lm) =>
+        Math.abs(lm.latitude - latitude) < 0.0015 &&
+        Math.abs(lm.longitude - longitude) < 0.0015,
+    );
 
   // Accuracy circle and radius are shown ONLY for browser_gps
   const showGpsAccuracyRadius =
@@ -366,7 +374,13 @@ export const SetuMapLibre: React.FC<SetuMapLibreProps> = ({
   const primaryLabel =
     locationSource === 'landmark' && matchedLandmark
       ? matchedLandmark.name_romanised
-      : `Hitech City / Madhapur Corridor`;
+      : callerLandmarkText
+        ? callerLandmarkText
+        : broadLocationText
+          ? broadLocationText
+          : matchedLandmark
+            ? matchedLandmark.name_romanised
+            : 'Hitech City / Madhapur Corridor';
 
   const resolvedMatchConfidence =
     matchConfidence ??
@@ -375,7 +389,7 @@ export const SetuMapLibre: React.FC<SetuMapLibreProps> = ({
   // Tooltip metric: GPS shows accuracy radius (±Xm), landmark shows match confidence (%)
   const tooltipMetricLabel =
     locationSource === 'browser_gps' && accuracyMeters !== null
-      ? `±${accuracyMeters} m`
+      ? `±${Math.round(accuracyMeters)} m`
       : locationSource === 'landmark'
         ? `${Math.round(resolvedMatchConfidence * 100)}% match`
         : 'Unresolved';
@@ -383,8 +397,9 @@ export const SetuMapLibre: React.FC<SetuMapLibreProps> = ({
   return (
     <div
       data-testid="spatial-coordination-map"
-      className="relative w-full h-72 sm:h-80 rounded-xl overflow-hidden border border-slate-200 bg-[#eef2f3]"
+      className="w-full rounded-xl overflow-hidden border border-slate-200 bg-[#eef2f3] flex flex-col"
     >
+      <div className="relative w-full h-64 sm:h-72 overflow-hidden">
       {/* Legible Vector-Style Fallback Road Network & Labels (visible while tiles stream or offline) */}
       <svg
         aria-hidden="true"
@@ -486,11 +501,13 @@ export const SetuMapLibre: React.FC<SetuMapLibreProps> = ({
           </div>
         )}
 
-        {/* Tooltip placed strictly ABOVE the pin/circle with downward arrow */}
+        {/* Tooltip placed strictly ABOVE the pin/circle (or flipped below if pin is near top edge) */}
         <div
-          style={{
-            bottom: `${visualRadiusPx + 14}px`,
-          }}
+          style={
+            pinPixelPos && pinPixelPos.y < 95
+              ? { top: `${visualRadiusPx + 14}px` }
+              : { bottom: `${visualRadiusPx + 14}px` }
+          }
           className="absolute left-1/2 -translate-x-1/2 whitespace-nowrap bg-slate-900 text-white text-xs font-medium px-3 py-1.5 rounded-lg shadow-lg border border-slate-700 flex items-center gap-2"
         >
           <span
@@ -502,17 +519,23 @@ export const SetuMapLibre: React.FC<SetuMapLibreProps> = ({
                   : 'bg-red-400'
             }`}
           />
-          <span className="font-semibold">{primaryLabel}</span>
+          <span className="font-semibold max-w-[195px] truncate" title={primaryLabel}>
+            {primaryLabel}
+          </span>
           <span
             data-testid="map-tooltip-metric"
-            className="text-teal-200 font-semibold tabular-nums"
+            className="text-teal-200 font-semibold tabular-nums shrink-0"
           >
             {tooltipMetricLabel}
           </span>
-          {/* Downward Arrow */}
+          {/* Directional Arrow */}
           <span
             aria-hidden="true"
-            className="absolute left-1/2 -bottom-1.5 -translate-x-1/2 w-3 h-3 bg-slate-900 border-r border-b border-slate-700 rotate-45"
+            className={
+              pinPixelPos && pinPixelPos.y < 95
+                ? 'absolute left-1/2 -top-1.5 -translate-x-1/2 w-3 h-3 bg-slate-900 border-l border-t border-slate-700 rotate-45'
+                : 'absolute left-1/2 -bottom-1.5 -translate-x-1/2 w-3 h-3 bg-slate-900 border-r border-b border-slate-700 rotate-45'
+            }
           />
         </div>
 
@@ -549,28 +572,31 @@ export const SetuMapLibre: React.FC<SetuMapLibreProps> = ({
           </div>
         </div>
       ))}
+      </div>
 
-      {/* Bottom Interactive Synthetic Landmark Quick-Selector Bar */}
+      {/* Bottom Interactive Synthetic Landmark Quick-Selector Bar (Placed cleanly below map canvas) */}
       {onSelectLandmark && (
-        <div className="absolute bottom-2.5 left-2.5 right-12 z-10 flex items-center gap-1.5 overflow-x-auto py-1 px-1.5 bg-white/95 backdrop-blur-xs border border-slate-200 rounded-lg shadow-xs">
-          <span className="text-xs font-semibold text-slate-700 whitespace-nowrap px-1">
+        <div className="flex items-center gap-1.5 overflow-x-auto py-1.5 px-2.5 bg-white border-t border-slate-200">
+          <span className="text-xs font-bold text-slate-700 whitespace-nowrap pr-1">
             Landmarks:
           </span>
           {SYNTHETIC_LANDMARKS.map((lm) => {
             const isSelected =
-              matchedLandmarkId === lm.landmark_id && locationSource === 'landmark';
+              (matchedLandmarkId === lm.landmark_id ||
+                matchedLandmark?.landmark_id === lm.landmark_id) &&
+              locationSource === 'landmark';
             return (
               <button
                 key={lm.landmark_id}
                 type="button"
                 onClick={() => onSelectLandmark(lm)}
-                className={`min-h-[36px] px-2.5 py-1 rounded text-xs font-medium whitespace-nowrap transition-colors cursor-pointer ${
+                className={`min-h-[32px] px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors cursor-pointer ${
                   isSelected
-                    ? 'bg-teal-900 text-white font-semibold'
-                    : 'bg-slate-100 text-slate-800 hover:bg-slate-200'
+                    ? 'bg-[#0B3B3C] text-white font-semibold shadow-2xs'
+                    : 'bg-slate-100 text-slate-800 hover:bg-slate-200 border border-slate-200/80'
                 }`}
               >
-                {lm.name_romanised} ({Math.round(lm.match_confidence * 100)}% match)
+                {lm.name_romanised} ({Math.round(lm.match_confidence * 100)}%)
               </button>
             );
           })}

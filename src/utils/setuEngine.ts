@@ -18,7 +18,19 @@
  *   playback stop before network cancellation.
  */
 
-export type SupportedLanguage = 'en' | 'te' | 'hi';
+export type SupportedLanguage = 'en' | 'te' | 'hi' | 'kn' | 'ta' | 'ml' | 'bn';
+
+export type LanguageSelectionMode = 'manual' | 'auto';
+
+export const LANGUAGE_DISPLAY_NAMES: Record<SupportedLanguage, string> = {
+  en: 'English',
+  te: 'Telugu',
+  hi: 'Hindi',
+  kn: 'Kannada',
+  ta: 'Tamil',
+  ml: 'Malayalam',
+  bn: 'Bengali',
+};
 
 export type EmergencyCategory =
   | 'medical_emergency'
@@ -83,6 +95,26 @@ export const SPOKEN_DISCLOSURE_BY_LANGUAGE: Record<SupportedLanguage, { instruct
     instructionId: 'disclosure_session_start',
     version: 'v1.0',
     text: 'सेतु (SETU) आपातकालीन समन्वय का एक प्रोटोटाइप है। यह भारत की आधिकारिक 112 सेवा का स्थान नहीं लेता और 112 से जुड़ा नहीं है। इस डेमो में सभी संसाधन, आवंटन और समय (ETA) सिम्युलेटेड हैं। वास्तविक आपातकाल के लिए कृपया 112 पर कॉल करें।',
+  },
+  kn: {
+    instructionId: 'disclosure_session_start',
+    version: 'v1.0',
+    text: 'ಸೇತು (SETU) ತುರ್ತು ಸಮನ್ವಯಕ್ಕಾಗಿ ರೂಪಿಸಲಾದ ಪ್ರোটೋಟೈಪ್ ಆಗಿದೆ. ಇದು ಭಾರತದ ಅಧಿಕೃತ 112 ತುರ್ತು ಸೇವೆಗೆ ಬದಲಿಯಾಗಿಲ್ಲ ಮತ್ತು 112 ಗೆ ಸಂಪರ್ಕಗೊಂಡಿಲ್ಲ. ಈ ಡೆಮೊದಲ್ಲಿನ ಎಲ್ಲಾ ಸಂಪನ್ಮೂಲಗಳು, ನಿಯೋಜನೆಗಳು ಮತ್ತು ಸಮಯಗಳು ಸಿಮ್ಯುಲೇಟೆಡ್ ಆಗಿವೆ. ನಿಜವಾದ ತುರ್ತು ಪರಿಸ್ಥಿತಿಗಾಗಿ ದಯವಿಟ್ಟು 112 ಗೆ ಕರೆ ಮಾಡಿ.',
+  },
+  ta: {
+    instructionId: 'disclosure_session_start',
+    version: 'v1.0',
+    text: 'சேது (SETU) என்பது அவசரகால ஒருங்கிணைப்புக்கான ஒரு மாதிரி (prototype) ஆகும். இது இந்தியாவின் அதிகாரப்பூர்வ 112 அவசர சேவைக்கு மாற்றானது அல்ல மற்றும் 112 உடன் இணைக்கப்படவில்லை. இந்த டெமோவில் உள்ள அனைத்து வாகனங்களும் நேரங்களும் மாதிரியானவை. உண்மையான அவசரநிலைக்கு 112 ஐ அழைக்கவும்.',
+  },
+  ml: {
+    instructionId: 'disclosure_session_start',
+    version: 'v1.0',
+    text: 'സേതു (SETU) അടിയന്തര ഏകോപനത്തിനായുള്ള ഒരു പ്രോട്ടോടൈപ്പ് ആണ്. ഇത് ഇന്ത്യയുടെ ഔദ്യോഗിക 112 സേവനത്തിന് പകരമല്ല, 112-മായി ബന്ധിപ്പിച്ചിട്ടുമില്ല. ഈ ഡെമോയിലെ എല്ലാ വിഭവങ്ങളും സമയക്രമങ്ങളും സിമുലേറ്റഡ് മാത്രമാണ്. യഥാർത്ഥ അടിയന്തര സാഹചര്യത്തിന് ദയവായി 112-ൽ വിളിക്കുക.',
+  },
+  bn: {
+    instructionId: 'disclosure_session_start',
+    version: 'v1.0',
+    text: 'সেতু (SETU) জরুরি সমন্বয়ের একটি প্রোটোটাইপ। এটি ভারতের অফিসিয়াল ১১২ জরুরি পরিষেবার বিকল্প নয় এবং ১১২-এর সাথে যুক্ত নয়। এই ডেমোতে ব্যবহৃত সমস্ত অ্যাম্বুলেন্স, ফায়ার ইঞ্জিন এবং সময় (ETA) সিমুলেটেড। প্রকৃত জরুরি অবস্থার জন্য অনুগ্রহ করে ১১২ নম্বরে কল করুন।',
   },
 };
 
@@ -435,7 +467,7 @@ export function rankHospitalsDeterministic(
         hospital,
         distance_km: Number(distKm.toFixed(2)),
         eta_minutes: null,
-        eta_source_label: 'unavailable (re-normalised distance + capability)',
+        eta_source_label: 'unavailable (weights re-normalised)',
         matched_capabilities: matched,
         distance_component_score: Number(distScore.toFixed(4)),
         eta_component_score: null,
@@ -447,7 +479,7 @@ export function rankHospitalsDeterministic(
         weighted_eta_contribution: 0,
         weighted_capability_contribution: Number(cCap.toFixed(4)),
         final_score: Number(finalScore.toFixed(4)),
-        methodology_note: `Routing ETA unavailable (Gate 0.8); weights re-normalised across distance (${wDist.toFixed(2)}) and capability fit (${wCap.toFixed(2)}).`,
+        methodology_note: `Routing ETA unavailable; weights re-normalised across distance (${Number(wDist.toFixed(3))} / ${(wDist * 100).toFixed(1)}%) and capability fit (${Number(wCap.toFixed(3))} / ${(wCap * 100).toFixed(1)}%).`,
       };
     })
     .sort((a, b) => b.final_score - a.final_score || a.distance_km - b.distance_km);
@@ -510,3 +542,359 @@ export class ContinuousAudioRingBuffer {
     return this.buffer.byteLength;
   }
 }
+
+export type VoiceInteractionState =
+  | 'idle'
+  | 'initialising'
+  | 'requesting_microphone'
+  | 'microphone_denied'
+  | 'speaking_introduction'
+  | 'listening'
+  | 'speech_detected'
+  | 'transcribing'
+  | 'understanding'
+  | 'speaking'
+  | 'interrupted';
+
+export type VoiceVisualStage =
+  | 'idle'
+  | 'listening'
+  | 'hearing'
+  | 'understanding'
+  | 'responding'
+  | 'error';
+
+export type VoiceLifecycleEvent =
+  | 'session_started_requesting_mic'
+  | 'mic_ready_listening'
+  | 'mic_denied_or_error'
+  | 'intro_playback_started'
+  | 'caller_speech_started'
+  | 'caller_barge_in_started'
+  | 'caller_speech_finalized'
+  | 'vad_misfire_discarded'
+  | 'transcript_ready_understanding'
+  | 'orchestration_updated'
+  | 'tts_response_started'
+  | 'turn_completed_no_audio'
+  | 'tts_playback_ended'
+  | 'turn_error_or_timeout'
+  | 'mic_paused'
+  | 'session_ended';
+
+export interface VoiceTransitionContext {
+  sessionActive: boolean;
+  isSpeechStreaming: boolean;
+  isTurnProcessing: boolean;
+  isTtsPlaying: boolean;
+}
+
+/**
+ * Pure, race-safe voice interaction state machine mapping real audio, VAD,
+ * WebSocket, and TTS playback lifecycle events to the next VoiceInteractionState.
+ */
+export function transitionVoiceInteractionState(
+  current: VoiceInteractionState,
+  event: VoiceLifecycleEvent,
+  ctx: VoiceTransitionContext,
+): VoiceInteractionState {
+  switch (event) {
+    case 'session_ended':
+      return 'idle';
+
+    case 'mic_denied_or_error':
+      return 'microphone_denied';
+
+    case 'session_started_requesting_mic':
+      return 'requesting_microphone';
+
+    case 'intro_playback_started':
+      return 'speaking_introduction';
+
+    case 'mic_ready_listening':
+      if (ctx.isTtsPlaying) {
+        return current === 'speaking_introduction' ? 'speaking_introduction' : 'speaking';
+      }
+      if (ctx.isTurnProcessing) {
+        return 'understanding';
+      }
+      return ctx.sessionActive ? 'listening' : 'idle';
+
+    case 'caller_barge_in_started':
+      return 'interrupted';
+
+    case 'caller_speech_started':
+      if (!ctx.sessionActive) {
+        return current;
+      }
+      if (ctx.isTtsPlaying) {
+        return 'interrupted';
+      }
+      return 'speech_detected';
+
+    case 'caller_speech_finalized':
+      if (!ctx.sessionActive) {
+        return 'idle';
+      }
+      return 'transcribing';
+
+    case 'vad_misfire_discarded':
+      if (ctx.isTtsPlaying) {
+        return current === 'speaking_introduction' ? 'speaking_introduction' : 'speaking';
+      }
+      if (ctx.isTurnProcessing) {
+        return 'understanding';
+      }
+      return ctx.sessionActive ? 'listening' : 'idle';
+
+    case 'transcript_ready_understanding':
+      if (ctx.isSpeechStreaming) {
+        return 'speech_detected';
+      }
+      if (ctx.isTtsPlaying) {
+        return 'speaking';
+      }
+      return 'understanding';
+
+    case 'orchestration_updated':
+      if (ctx.isSpeechStreaming) {
+        return 'speech_detected';
+      }
+      if (current === 'speaking' || ctx.isTtsPlaying) {
+        return 'speaking';
+      }
+      return 'understanding';
+
+    case 'tts_response_started':
+      if (ctx.isSpeechStreaming) {
+        return 'speech_detected';
+      }
+      return 'speaking';
+
+    case 'turn_completed_no_audio':
+      if (ctx.isSpeechStreaming) {
+        return 'speech_detected';
+      }
+      if (ctx.isTtsPlaying) {
+        return current === 'speaking_introduction' ? 'speaking_introduction' : 'speaking';
+      }
+      return ctx.sessionActive ? 'listening' : 'idle';
+
+    case 'tts_playback_ended':
+      if (ctx.isSpeechStreaming) {
+        return 'speech_detected';
+      }
+      if (ctx.isTurnProcessing) {
+        return 'understanding';
+      }
+      return ctx.sessionActive ? 'listening' : 'idle';
+
+    case 'turn_error_or_timeout':
+      if (ctx.isSpeechStreaming) {
+        return 'speech_detected';
+      }
+      if (ctx.isTtsPlaying) {
+        return 'speaking';
+      }
+      return ctx.sessionActive ? 'listening' : 'idle';
+
+    case 'mic_paused':
+      if (
+        current === 'listening' ||
+        current === 'speech_detected' ||
+        current === 'interrupted'
+      ) {
+        return 'idle';
+      }
+      return current;
+
+    default:
+      return current;
+  }
+}
+
+export interface VoiceStagePresentation {
+  stage: VoiceVisualStage;
+  label: string;
+  sublabel: string;
+  animationMode: 'hearing_reactive' | 'understanding_pulse' | 'responding_wave' | 'listening_ready' | 'idle';
+  barHeightsPct: [number, number, number, number, number];
+}
+
+/**
+ * Computes the visual stage, exact user-facing label ("Hearing you…", "Understanding…",
+ * "Responding…", "Listening", "Ready"), and audio-reactive bar heights.
+ */
+export function resolveVoiceStagePresentation(
+  voiceState: VoiceInteractionState,
+  isTtsPlaying: boolean,
+  liveMicRms = 0,
+  liveSpeechProbability = 0,
+): VoiceStagePresentation {
+  const isHearing =
+    voiceState === 'speech_detected' ||
+    (voiceState === 'interrupted' && !isTtsPlaying);
+
+  if (isHearing) {
+    const energy = Math.min(
+      1,
+      Math.max(liveMicRms * 5.2, liveSpeechProbability * 0.85, 0.28),
+    );
+    return {
+      stage: 'hearing',
+      label: 'Hearing you…',
+      sublabel: 'Capturing your voice — pause briefly when finished speaking',
+      animationMode: 'hearing_reactive',
+      barHeightsPct: [
+        Math.round(35 + energy * 45),
+        Math.round(45 + energy * 55),
+        Math.round(55 + energy * 45),
+        Math.round(40 + energy * 50),
+        Math.round(30 + energy * 45),
+      ],
+    };
+  }
+
+  if (voiceState === 'transcribing' || voiceState === 'understanding') {
+    return {
+      stage: 'understanding',
+      label: 'Understanding…',
+      sublabel:
+        voiceState === 'transcribing'
+          ? 'Finalizing utterance & transcribing speech…'
+          : 'Analyzing emergency details & preparing response…',
+      animationMode: 'understanding_pulse',
+      barHeightsPct: [48, 72, 90, 72, 48],
+    };
+  }
+
+  if (
+    voiceState === 'speaking' ||
+    voiceState === 'speaking_introduction' ||
+    isTtsPlaying
+  ) {
+    return {
+      stage: 'responding',
+      label: 'Responding…',
+      sublabel:
+        voiceState === 'speaking_introduction'
+          ? 'Playing spoken prototype disclosure — speak anytime to interrupt'
+          : 'Speaking response — speak anytime to interrupt (barge-in)',
+      animationMode: 'responding_wave',
+      barHeightsPct: [60, 95, 75, 100, 65],
+    };
+  }
+
+  if (voiceState === 'listening') {
+    const subtleFloor = Math.min(0.25, liveMicRms * 2.5);
+    return {
+      stage: 'listening',
+      label: 'Listening',
+      sublabel: 'Ready for caller speech — speak naturally',
+      animationMode: 'listening_ready',
+      barHeightsPct: [
+        Math.round(28 + subtleFloor * 30),
+        Math.round(36 + subtleFloor * 35),
+        Math.round(42 + subtleFloor * 40),
+        Math.round(36 + subtleFloor * 35),
+        Math.round(28 + subtleFloor * 30),
+      ],
+    };
+  }
+
+  if (voiceState === 'microphone_denied') {
+    return {
+      stage: 'error',
+      label: 'Microphone access needed',
+      sublabel: 'Enable microphone permission or type below',
+      animationMode: 'idle',
+      barHeightsPct: [25, 25, 25, 25, 25],
+    };
+  }
+
+  return {
+    stage: 'idle',
+    label:
+      voiceState === 'requesting_microphone'
+        ? 'Starting microphone…'
+        : voiceState === 'initialising'
+          ? 'Preparing…'
+          : 'Ready',
+    sublabel: 'Voice session idle — start or enable microphone to speak',
+    animationMode: 'idle',
+    barHeightsPct: [28, 34, 30, 34, 28],
+  };
+}
+
+export interface DirectLanguageOption {
+  code: SupportedLanguage;
+  englishName: string;
+  nativeName: string;
+  fullLabel: string;
+  sublabel: string;
+}
+
+export const DIRECT_LANGUAGE_OPTIONS: readonly DirectLanguageOption[] = [
+  {
+    code: 'en',
+    englishName: 'English (IN)',
+    nativeName: 'English',
+    fullLabel: 'English (IN) — English',
+    sublabel: 'Indian English · Tanglish / Hinglish / Benglish Ready',
+  },
+  {
+    code: 'te',
+    englishName: 'Telugu',
+    nativeName: 'తెలుగు',
+    fullLabel: 'Telugu — తెలుగు',
+    sublabel: 'తెలుగు · Tanglish Ready',
+  },
+  {
+    code: 'hi',
+    englishName: 'Hindi',
+    nativeName: 'हिन्दी',
+    fullLabel: 'Hindi — हिन्दी',
+    sublabel: 'हिन्दी · Hinglish Ready',
+  },
+  {
+    code: 'kn',
+    englishName: 'Kannada',
+    nativeName: 'ಕನ್ನಡ',
+    fullLabel: 'Kannada — ಕನ್ನಡ',
+    sublabel: 'ಕನ್ನಡ · Direct Emergency Support',
+  },
+  {
+    code: 'ta',
+    englishName: 'Tamil',
+    nativeName: 'தமிழ்',
+    fullLabel: 'Tamil — தமிழ்',
+    sublabel: 'தமிழ் · Direct Emergency Support',
+  },
+  {
+    code: 'ml',
+    englishName: 'Malayalam',
+    nativeName: 'മലയാളം',
+    fullLabel: 'Malayalam — മലയാളം',
+    sublabel: 'മലയാളം · Direct Emergency Support',
+  },
+  {
+    code: 'bn',
+    englishName: 'Bengali',
+    nativeName: 'বাংলা',
+    fullLabel: 'Bengali — বাংলা',
+    sublabel: 'বাংলা · Benglish Ready',
+  },
+] as const;
+
+export function getDirectLanguageOption(lang: SupportedLanguage): DirectLanguageOption {
+  return (
+    DIRECT_LANGUAGE_OPTIONS.find((item) => item.code === lang) ?? DIRECT_LANGUAGE_OPTIONS[0]
+  );
+}
+
+export function formatSelectedLanguageStatus(lang: SupportedLanguage): string {
+  const opt = getDirectLanguageOption(lang);
+  return `Selected: ${opt.fullLabel}`;
+}
+
+
